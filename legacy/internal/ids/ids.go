@@ -20,6 +20,9 @@ type requestIDs struct {
 
 func deriveRequestIDs(r *http.Request, body map[string]any) requestIDs {
 	signal := firstString(
+		r.Header.Get("x-kilocode-session"),
+		r.Header.Get("x-kilocode-taskid"),
+		// Accept headers emitted by older local clients during migration.
 		r.Header.Get("x-opencode-session"),
 		r.Header.Get("x-session-affinity"),
 		r.Header.Get("X-Session-Id"),
@@ -40,9 +43,9 @@ func deriveRequestIDs(r *http.Request, body map[string]any) requestIDs {
 		signal = randomID("fallback", 16)
 	}
 	session := stableID("ses", signal)
-	projectSignal := firstString(r.Header.Get("x-opencode-project"), stringAt(body, "metadata", "project_id"))
+	projectSignal := firstString(r.Header.Get("x-kilocode-projectid"), r.Header.Get("x-opencode-project"), stringAt(body, "metadata", "project_id"))
 	if projectSignal == "" {
-		projectSignal = "opencode2api:default-project"
+		projectSignal = "kilo2dsh:default-project"
 	}
 	parentSession := firstString(
 		r.Header.Get("x-parent-session-id"),
@@ -97,6 +100,10 @@ func firstString(values ...string) string {
 	return ""
 }
 
-func opencodeUserAgent() string {
-	return fmt.Sprintf("opencode/1.18.21 (%s %s; %s)", runtime.GOOS, runtime.GOARCH, runtime.Version())
+func kiloUserAgent() string {
+	return fmt.Sprintf("kilo2dsh (%s %s; %s)", runtime.GOOS, runtime.GOARCH, runtime.Version())
 }
+
+// Compatibility spelling retained for callers that imported the reference
+// sidecar package. It no longer impersonates the OpenCode CLI.
+func opencodeUserAgent() string { return kiloUserAgent() }

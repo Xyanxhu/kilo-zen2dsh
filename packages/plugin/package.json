@@ -1,7 +1,7 @@
 {
-  "name": "@opencode2dsh/dsh-plugin",
-  "version": "0.2.6",
-  "description": "Free OpenCode Zen models for DeepSeek Harness (DSH): native dsh-llm adapter plugin, no API key.",
+  "name": "@kilo2dsh/dsh-plugin",
+  "version": "0.3.0",
+  "description": "Free Kilo Gateway models for DeepSeek Harness (DSH): native dsh-llm adapter plugin, no API key.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -18,10 +18,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/FishBottle7/opencode2dsh.git"
+    "url": "git+https://github.com/Xyanxhu/kilo2dsh.git"
   },
-  "homepage": "https://github.com/FishBottle7/opencode2dsh#readme",
-  "bugs": "https://github.com/FishBottle7/opencode2dsh/issues",
+  "homepage": "https://github.com/Xyanxhu/kilo2dsh#readme",
+  "bugs": "https://github.com/Xyanxhu/kilo2dsh/issues",
   "author": "FishBottle7 (https://github.com/FishBottle7)",
   "engines": {
     "node": ">=20"
@@ -41,8 +41,8 @@
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
-    "opencode",
-    "opencode-zen",
+    "kilo",
+    "kilo-gateway",
     "cordis",
     "cordis-plugin",
     "llm-adapter",
@@ -56,7 +56,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.82.1"
+    "@earendil-works/pi-ai": "0.82.1"
   },
   "pnpm": {
     "ignoredBuiltDependencies": [

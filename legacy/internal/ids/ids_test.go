@@ -8,8 +8,8 @@ import (
 
 func TestDeriveRequestIDsStableOnSessionHeader(t *testing.T) {
 	body := map[string]any{"model": "m", "messages": []any{map[string]any{"role": "user", "content": "hello"}}}
-	first := deriveRequestIDs(requestWithHeader("x-opencode-session", "abc"), body)
-	second := deriveRequestIDs(requestWithHeader("x-opencode-session", "abc"), body)
+	first := deriveRequestIDs(requestWithHeader("x-kilocode-session", "abc"), body)
+	second := deriveRequestIDs(requestWithHeader("x-kilocode-session", "abc"), body)
 	if first.Session != second.Session {
 		t.Fatalf("session id changed for identical signal: %s vs %s", first.Session, second.Session)
 	}
@@ -64,8 +64,8 @@ func TestHeaderPrecedenceOverConversationSeed(t *testing.T) {
 }
 
 func TestUserAgentShape(t *testing.T) {
-	ua := opencodeUserAgent()
-	if !strings.HasPrefix(ua, "opencode/1.18.21 (") {
+	ua := kiloUserAgent()
+	if !strings.HasPrefix(ua, "kilo2dsh (") {
 		t.Fatalf("unexpected user agent: %s", ua)
 	}
 }

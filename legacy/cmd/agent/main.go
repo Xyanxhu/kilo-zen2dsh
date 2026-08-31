@@ -1,5 +1,5 @@
-// Command agent is the opencode2dsh sidecar: a single-tenant anonymous-lane
-// proxy for OpenCode Zen, ported from opencode2api. main.go is the upstream
+// Command agent is the kilo2dsh sidecar: a single-tenant anonymous-lane
+// proxy for Kilo Gateway, ported from opencode2api. main.go is the upstream
 // startup/signal skeleton with WebUI and the multi-instance runtime removed.
 package main
 
@@ -16,10 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"opencode2dsh/agent/internal/catalog"
-	"opencode2dsh/agent/internal/config"
-	"opencode2dsh/agent/internal/gateway"
-	"opencode2dsh/agent/internal/obs"
+	"kilo2dsh/agent/internal/config"
+	"kilo2dsh/agent/internal/gateway"
+	"kilo2dsh/agent/internal/obs"
 )
 
 func main() {
@@ -44,12 +43,9 @@ func main() {
 	// plugin can pipe them; stdout stays reserved for the Phase 1 READY line.
 	logger := obs.NewLogger(cfg.Logging.Level)
 
-	// models.dev metadata (S2): the disk cache lives beside the config file
-	// and seeds the free-model decision before the first refresh.
-	metadata := catalog.NewModelMetadataStore(*configPath, logger)
-	metadata.Start(ctx)
-
-	gw, err := gateway.NewGateway(cfg, logger, metadata)
+	// Kilo publishes the free flag, pricing, and capabilities in the live
+	// /models response, so no secondary models.dev metadata service is needed.
+	gw, err := gateway.NewGateway(cfg, logger, nil)
 	if err != nil {
 		logger.Error("failed to initialize gateway", "component", "runtime", "event", "gateway_initialization_failed", "error", err)
 		os.Exit(1)

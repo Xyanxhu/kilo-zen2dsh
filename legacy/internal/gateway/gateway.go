@@ -1,5 +1,5 @@
-// Package gateway ports opencode2api gateway.go, trimmed to the single
-// anonymous Zen lane. The authenticated upstream machinery (doKeyUpstream,
+// Package gateway ports the small sidecar gateway, trimmed to Kilo's single
+// keyless free lane. The authenticated upstream machinery (doKeyUpstream,
 // KeyTiers fallback, dual zen/go node pools) and the WebUI/admin monitoring
 // hooks are not ported; Monitor call sites became slog lines.
 package gateway
@@ -16,17 +16,15 @@ import (
 	"strings"
 	"time"
 
-	"opencode2dsh/agent/internal/catalog"
-	"opencode2dsh/agent/internal/config"
-	"opencode2dsh/agent/internal/convert"
-	"opencode2dsh/agent/internal/ids"
-	"opencode2dsh/agent/internal/obs"
-	"opencode2dsh/agent/internal/pool"
+	"kilo2dsh/agent/internal/catalog"
+	"kilo2dsh/agent/internal/config"
+	"kilo2dsh/agent/internal/convert"
+	"kilo2dsh/agent/internal/ids"
+	"kilo2dsh/agent/internal/obs"
+	"kilo2dsh/agent/internal/pool"
 )
 
 const maxRequestBody = 32 << 20
-
-const anonymousZenKey = "public"
 
 const (
 	proxyHealthCheckURL      = "https://cloudflare.com/cdn-cgi/trace"
@@ -61,7 +59,8 @@ type healthModels struct {
 	Status            string     `json:"status"`
 	Total             int        `json:"total"`
 	Exposed           int        `json:"exposed"`
-	Zen               int        `json:"zen"`
+	Kilo              int        `json:"kilo"`
+	Zen               int        `json:"-"`
 	LastRefresh       *time.Time `json:"last_refresh,omitempty"`
 	StaleAfterSeconds int        `json:"stale_after_seconds"`
 }
@@ -139,7 +138,8 @@ func (g *Gateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			Status:            modelStatus,
 			Total:             models.Total,
 			Exposed:           models.Exposed,
-			Zen:               models.Zen,
+			Kilo:              models.Kilo,
+			Zen:               models.Kilo,
 			LastRefresh:       lastRefresh,
 			StaleAfterSeconds: int(staleAfter / time.Second),
 		},
@@ -185,7 +185,7 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		if _, err := g.catalog.Route(model, g.cfg.Anonymous); err != nil {
 			continue
 		}
-		data = append(data, map[string]any{"id": model, "object": "model", "created": now, "owned_by": "opencode"})
+		data = append(data, map[string]any{"id": model, "object": "model", "created": now, "owned_by": "kilo"})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
@@ -207,16 +207,12 @@ func (g *Gateway) handleInference(external catalog.Protocol) http.HandlerFunc {
 			writeAPIError(w, external, http.StatusBadRequest, "model is required", "invalid_request_error", "model")
 			return
 		}
-		if !g.catalog.Supported(model) {
-			writeAPIError(w, external, http.StatusBadRequest, "the model uses an upstream protocol that opencode2dsh does not expose", "invalid_request_error", "model")
-			return
-		}
 		route, err := g.catalog.Route(model, g.cfg.Anonymous)
 		if err != nil {
 			writeAPIError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
 			return
 		}
-		upstreamPayload, err := convert.PrepareUpstreamRequest(external, route.Protocol, payload, g.cfg.Upstream.Zen)
+		upstreamPayload, err := convert.PrepareUpstreamRequest(external, route.Protocol, payload, g.cfg.UpstreamURL())
 		if err != nil {
 			writeAPIError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
 			return
@@ -232,7 +228,7 @@ func (g *Gateway) handleInference(external catalog.Protocol) http.HandlerFunc {
 		defer cancel()
 		resp, err := g.doAnonymousUpstream(requestCtx, route, upstreamBody, reqIDs)
 		if err != nil {
-			g.logger.Warn("all upstream attempts failed", "component", "upstream", "event", "request_failed", "request_id", reqIDs.Request, "tier", route.Tier, "anonymous", true, "error", err)
+			g.logger.Warn("all Kilo upstream attempts failed", "component", "upstream", "event", "request_failed", "request_id", reqIDs.Request, "tier", route.Tier, "anonymous", true, "error", err)
 			writeAPIError(w, external, http.StatusBadGateway, "all upstream attempts failed", "upstream_error", reqIDs.Request)
 			return
 		}
@@ -256,7 +252,7 @@ func (g *Gateway) handleInference(external catalog.Protocol) http.HandlerFunc {
 				usageReported = observer.Reported()
 			} else {
 				// Cross-protocol transcoding is an interface placeholder in
-				// opencode2dsh; the branch is unreachable while the gateway
+				// kilo2dsh; the branch is unreachable while the gateway
 				// only routes Chat.
 				err = convert.NoTranscode()
 			}
@@ -274,7 +270,7 @@ func (g *Gateway) handleInference(external catalog.Protocol) http.HandlerFunc {
 			return
 		}
 		if external != route.Protocol {
-			g.logger.Warn("response protocol conversion is not available in opencode2dsh", "component", "conversion", "event", "response_conversion_unavailable", "request_id", reqIDs.Request, "model", model)
+			g.logger.Warn("response protocol conversion is not available in kilo2dsh", "component", "conversion", "event", "response_conversion_unavailable", "request_id", reqIDs.Request, "model", model)
 			writeAPIError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", reqIDs.Request)
 			return
 		}
@@ -285,7 +281,7 @@ func (g *Gateway) handleInference(external catalog.Protocol) http.HandlerFunc {
 }
 
 // doAnonymousUpstream is gateway.go:424-483 with the multi-layer semantics
-// removed: opencode2dsh has no authenticated fallback, so exhausting the
+// removed: kilo2dsh has no authenticated fallback, so exhausting the
 // proxy cursor is final. It tries every currently available proxy at most
 // once; only a successful response ends the attempt loop.
 func (g *Gateway) doAnonymousUpstream(ctx context.Context, route catalog.ModelRoute, body []byte, reqIDs ids.RequestIDs) (*http.Response, error) {
@@ -295,7 +291,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route catalog.ModelRo
 	limit := g.anonymous.Len()
 	attempts := 0
 	if len(body) == 0 {
-		return nil, errors.New("no prepared Zen request body")
+		return nil, errors.New("no prepared Kilo request body")
 	}
 	for attempts < limit {
 		node := cursor.Next()
@@ -307,7 +303,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route catalog.ModelRo
 			pool.DrainAndClose(lastResponse.Body)
 			lastResponse = nil
 		}
-		req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Zen, route.Protocol, body, reqIDs, anonymousZenKey)
+		req, err := newUpstreamRequest(ctx, g.cfg.UpstreamURL(), route.Protocol, body, reqIDs, g.cfg.AnonymousKey)
 		if err != nil {
 			return nil, err
 		}
@@ -321,7 +317,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route catalog.ModelRo
 		g.syncProxyResult(node.Proxy, status, err)
 		if err == nil && resp.StatusCode/100 == 2 {
 			g.anonymous.MarkSuccess(node)
-			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", reqIDs.Request, "attempt", attempts, "tier", catalog.TierZen, "key_id", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.Proxy.Name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+			g.logger.Debug("anonymous upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", reqIDs.Request, "attempt", attempts, "tier", catalog.TierKilo, "key_id", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.Proxy.Name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
 			return resp, nil
 		}
 		g.anonymous.MarkFailure(node, resp, err)
@@ -351,25 +347,24 @@ func newUpstreamRequest(ctx context.Context, baseURL string, protocol catalog.Pr
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", ids.UserAgent())
-	req.Header.Set("x-opencode-client", "cli")
-	req.Header.Set("x-opencode-session", reqIDs.Session)
-	// OpenCode 1.18.x sends these correlation headers to preserve provider-side
-	// prompt/session affinity. Keep the legacy x-opencode-session header too so
-	// older Zen deployments continue to recognize the request.
-	req.Header.Set("x-session-affinity", reqIDs.Session)
-	req.Header.Set("X-Session-Id", reqIDs.Session)
-	req.Header.Set("x-opencode-request", reqIDs.Request)
-	req.Header.Set("x-opencode-project", reqIDs.Project)
+	// Kilo's gateway accepts ordinary OpenAI-compatible requests. These
+	// correlation headers are useful for routing/diagnostics but do not spoof
+	// the OpenCode CLI identity.
+	req.Header.Set("x-kilocode-editorname", "DSH/kilo2dsh")
+	req.Header.Set("x-kilocode-taskid", reqIDs.Request)
+	req.Header.Set("x-kilocode-projectid", reqIDs.Project)
 	if reqIDs.ParentSession != "" {
-		req.Header.Set("x-parent-session-id", reqIDs.ParentSession)
+		req.Header.Set("x-kilocode-parent-taskid", reqIDs.ParentSession)
 	}
 	if protocol == catalog.ProtocolAnthropic {
 		// Interface placeholder: the Anthropic lane is not registered.
-		req.Header.Set("x-api-key", key)
+		if strings.TrimSpace(key) != "" {
+			req.Header.Set("x-api-key", strings.TrimSpace(key))
+		}
 		req.Header.Set("anthropic-version", "2023-06-01")
 		req.Header.Set("anthropic-beta", "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
-	} else {
-		req.Header.Set("Authorization", "Bearer "+key)
+	} else if strings.TrimSpace(key) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
 	}
 	return req, nil
 }
@@ -403,11 +398,11 @@ func (g *Gateway) syncProxyResult(proxy *pool.ProxyTransport, status int, err er
 func protocolPath(protocol catalog.Protocol) string {
 	switch protocol {
 	case catalog.ProtocolResponses:
-		return "/v1/responses"
+		return "/responses"
 	case catalog.ProtocolAnthropic:
-		return "/v1/messages"
+		return "/messages"
 	default:
-		return "/v1/chat/completions"
+		return "/chat/completions"
 	}
 }
 
@@ -416,8 +411,8 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 		// The anonymous lane refresh is refreshAnonymousTier
 		// (gateway.go:870-891): the authenticated key-tier refresh paths are
 		// not ported.
-		if models := g.refreshAnonymousTier(ctx, g.cfg.Upstream.Zen); models != nil {
-			g.catalog.Replace(models)
+		if models := g.refreshAnonymousTier(ctx, g.cfg.UpstreamURL()); models != nil {
+			g.catalog.ReplaceRecords(models)
 			g.logger.Info("model catalog refreshed", "component", "models", "event", "catalog_refreshed", "models", len(g.catalog.List()))
 		}
 	}
@@ -436,7 +431,7 @@ func (g *Gateway) StartModelRefresh(ctx context.Context) {
 	}()
 }
 
-func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []string {
+func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []catalog.KiloModel {
 	cursor := g.anonymous.CursorFor("")
 	limit := g.anonymous.Len()
 	for attempt := 1; attempt <= limit; attempt++ {
@@ -445,7 +440,7 @@ func (g *Gateway) refreshAnonymousTier(ctx context.Context, base string) []strin
 			break
 		}
 		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		models, status, err := catalog.FetchModels(refreshCtx, node.Proxy.Client, base, anonymousZenKey)
+		models, status, err := catalog.FetchKiloModels(refreshCtx, node.Proxy.Client, base, g.cfg.AnonymousKey)
 		g.syncProxyResult(node.Proxy, status, err)
 		cancel()
 		if err == nil {

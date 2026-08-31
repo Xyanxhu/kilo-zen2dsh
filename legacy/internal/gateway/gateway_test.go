@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"opencode2dsh/agent/internal/catalog"
-	"opencode2dsh/agent/internal/config"
+	"kilo2dsh/agent/internal/catalog"
+	"kilo2dsh/agent/internal/config"
 )
 
 func discardLogger() *slog.Logger {
@@ -24,7 +24,7 @@ func testConfig(keys ...string) config.Config {
 		Listen:      "127.0.0.1:0",
 		ServerKeys:  keys,
 		Anonymous:   true,
-		Upstream:    config.UpstreamConfig{Zen: "https://opencode.ai/zen"},
+		Upstream:    config.UpstreamConfig{Kilo: "https://api.kilo.ai/api/gateway"},
 		Retry:       config.RetryConfig{MaxAttempts: 2, TimeoutSeconds: 30},
 		Models:      config.ModelsConfig{RefreshSeconds: 300},
 		Performance: config.PerformanceConfig{MaxIdleConns: 8, MaxIdleConnsPerHost: 2, IdleConnTimeoutSeconds: 30, ConnectTimeoutSeconds: 2, FailureCooldownSeconds: 1},
@@ -45,14 +45,14 @@ func newTestGateway(t *testing.T, upstream http.HandlerFunc, static []string, ke
 		catalog.SetStaticFreeModelsForTesting(static)
 		t.Cleanup(func() { catalog.SetStaticFreeModelsForTesting(nil) })
 	}
-	gw, err := NewGateway(testConfig(keys...), discardLogger(), catalog.NewModelMetadataStore("", nil))
+	gw, err := NewGateway(testConfig(keys...), discardLogger(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if upstream != nil {
 		upstreamServer := httptest.NewServer(upstream)
 		t.Cleanup(upstreamServer.Close)
-		gw.cfg.Upstream.Zen = upstreamServer.URL
+		gw.cfg.Upstream.Kilo = upstreamServer.URL
 	}
 	api := httptest.NewServer(gw.Handler())
 	t.Cleanup(api.Close)
@@ -138,19 +138,19 @@ func TestHandleInferenceEndToEnd(t *testing.T) {
 	var seen http.Header
 	_, api := newTestGateway(t, func(w http.ResponseWriter, r *http.Request) {
 		seen = r.Header.Clone()
-		if r.URL.Path != "/v1/chat/completions" {
+		if r.URL.Path != "/chat/completions" {
 			t.Errorf("upstream path: %s", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer public" {
-			t.Errorf("anonymous credential must be Bearer public, got %q", got)
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Kilo free request must omit Authorization, got %q", got)
 		}
-		if r.Header.Get("x-opencode-client") != "cli" {
-			t.Error("client header missing")
+		if r.Header.Get("x-kilocode-editorname") != "DSH/kilo2dsh" {
+			t.Error("Kilo editor header missing")
 		}
-		if !strings.HasPrefix(r.Header.Get("x-opencode-session"), "ses_") {
-			t.Error("session header missing")
+		if !strings.HasPrefix(r.Header.Get("x-kilocode-taskid"), "req_") {
+			t.Error("Kilo task header missing")
 		}
-		if !strings.Contains(r.Header.Get("User-Agent"), "opencode/") {
+		if !strings.HasPrefix(r.Header.Get("User-Agent"), "kilo2dsh") {
 			t.Error("user agent missing")
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -177,7 +177,7 @@ func TestHandleInferenceEndToEnd(t *testing.T) {
 	if payload["id"] != "chatcmpl-1" {
 		t.Fatalf("response not passed through: %v", payload)
 	}
-	if seen == nil || seen.Get("x-opencode-request") == "" || seen.Get("x-opencode-project") == "" {
+	if seen == nil || seen.Get("x-kilocode-taskid") == "" || seen.Get("x-kilocode-projectid") == "" {
 		t.Fatalf("correlation headers must reach upstream: %v", seen)
 	}
 }
@@ -277,14 +277,18 @@ func TestHealthzReadyAfterRefresh(t *testing.T) {
 	if payload.Status != "ok" || !payload.Ready {
 		t.Fatalf("fresh catalog must be ok: %+v", payload)
 	}
-	if payload.Models.Zen != 1 || payload.Models.Exposed != 1 {
+	if payload.Models.Kilo != 1 || payload.Models.Exposed != 1 {
 		t.Fatalf("unexpected models block: %+v", payload.Models)
 	}
 }
 
 func TestUnknownModelRejected(t *testing.T) {
 	gw, api := newTestGateway(t, nil, []string{"known-model"}, "dev")
-	gw.catalog.Replace([]string{"known-model", "paid-model"})
+	free, paid := true, false
+	gw.catalog.ReplaceRecords([]catalog.KiloModel{
+		{ID: "known-model", IsFree: &free, SupportedParameters: []string{"tools"}},
+		{ID: "paid-model", IsFree: &paid, SupportedParameters: []string{"tools"}},
+	})
 
 	req, _ := http.NewRequest("POST", api.URL+"/v1/chat/completions", strings.NewReader(`{"model":"paid-model","messages":[{"role":"user","content":"x"}]}`))
 	req.Header.Set("Authorization", "Bearer dev")
@@ -298,7 +302,7 @@ func TestUnknownModelRejected(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("routable-but-paid model must be rejected at routing, got %d", resp.StatusCode)
 	}
-	if !strings.Contains(payload["error"].(map[string]any)["message"].(string), "not available in the anonymous Zen catalog") {
+	if !strings.Contains(payload["error"].(map[string]any)["message"].(string), "not available in the Kilo free catalog") {
 		t.Fatalf("route error message unexpected: %v", payload)
 	}
 
@@ -344,11 +348,14 @@ func TestOversizedBodyRejected(t *testing.T) {
 }
 
 func TestStartModelRefreshPopulatesCatalog(t *testing.T) {
-	gw, api := newTestGateway(t, func(w http.ResponseWriter, _ *http.Request) {
-		// Free-judged ids: metadata is absent in this test, so the name
-		// fallback (models.go:257) is what lets them pass the /v1/models
-		// filter -- matching how real free models read via models.dev.
-		w.Write([]byte(`{"data":[{"id":"dyn-a-free"},{"id":"dyn-b-free"}]}`))
+	gw, api := newTestGateway(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("catalog path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Error("catalog discovery must be keyless")
+		}
+		w.Write([]byte(`{"data":[{"id":"dyn-a-free","isFree":true,"supported_parameters":["tools"]},{"id":"dyn-b:free","isFree":true,"supported_parameters":["tools"]}]}`))
 	}, nil, "dev")
 	gw.StartModelRefresh(context.Background())
 	deadline := time.Now().Add(3 * time.Second)
@@ -374,7 +381,7 @@ func TestStartModelRefreshPopulatesCatalog(t *testing.T) {
 func TestUpstreamTransportFailureIs502(t *testing.T) {
 	gw, api := newTestGateway(t, nil, []string{"unreachable-model"}, "dev")
 	// Point upstream at a dead port to force a transport failure.
-	gw.cfg.Upstream.Zen = "http://127.0.0.1:1"
+	gw.cfg.Upstream.Kilo = "http://127.0.0.1:1"
 
 	req, _ := http.NewRequest("POST", api.URL+"/v1/chat/completions", strings.NewReader(`{"model":"unreachable-model","messages":[{"role":"user","content":"x"}]}`))
 	req.Header.Set("Authorization", "Bearer dev")
@@ -394,13 +401,13 @@ func TestUpstreamTransportFailureIs502(t *testing.T) {
 }
 
 func TestProtocolPath(t *testing.T) {
-	if protocolPath(catalog.ProtocolChat) != "/v1/chat/completions" {
+	if protocolPath(catalog.ProtocolChat) != "/chat/completions" {
 		t.Fatal("chat path")
 	}
-	if protocolPath(catalog.ProtocolResponses) != "/v1/responses" {
+	if protocolPath(catalog.ProtocolResponses) != "/responses" {
 		t.Fatal("responses path")
 	}
-	if protocolPath(catalog.ProtocolAnthropic) != "/v1/messages" {
+	if protocolPath(catalog.ProtocolAnthropic) != "/messages" {
 		t.Fatal("anthropic path")
 	}
 }

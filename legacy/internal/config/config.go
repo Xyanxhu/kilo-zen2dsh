@@ -1,7 +1,7 @@
-// Package config ports opencode2api config.go, trimmed for the single-tenant
-// anonymous sidecar: WebUI/password/Prefer/Go-upstream fields are removed, the
-// defaults move to a loopback random port with anonymous always enabled, and
-// NormalizeConfig additionally rejects non-loopback listen addresses.
+// Package config contains the small, single-tenant configuration surface used
+// by the Kilo free-tier sidecar.  The local API still uses an API key so a DSH
+// process cannot be reached by another local user, while the upstream Kilo
+// free lane is keyless unless an explicit token is configured.
 package config
 
 import (
@@ -20,24 +20,41 @@ import (
 )
 
 type Config struct {
-	Listen      string            `json:"listen"`
-	ServerKeys  []string          `json:"server_keys"`
-	ZenKeys     []string          `json:"zen_keys"`
-	GoKeys      []string          `json:"go_keys"`
-	Anonymous   bool              `json:"anonymous"`
-	Proxies     []string          `json:"proxies"`
-	ProxyFile   string            `json:"proxyfile"`
-	Upstream    UpstreamConfig    `json:"upstream"`
-	Retry       RetryConfig       `json:"retry"`
-	Models      ModelsConfig      `json:"models"`
-	Performance PerformanceConfig `json:"performance"`
-	Logging     LoggingConfig     `json:"logging"`
+	Listen     string   `json:"listen"`
+	ServerKeys []string `json:"server_keys"`
+	KiloKeys   []string `json:"kilo_keys"`
+	// ZenKeys and the zen upstream field are accepted for one release as a
+	// migration path from the reference project. They are never required for
+	// Kilo and are not emitted by the plugin.
+	ZenKeys      []string          `json:"zen_keys,omitempty"`
+	GoKeys       []string          `json:"go_keys,omitempty"`
+	Anonymous    bool              `json:"anonymous"`
+	AnonymousKey string            `json:"anonymous_key"`
+	Proxies      []string          `json:"proxies"`
+	ProxyFile    string            `json:"proxyfile"`
+	Upstream     UpstreamConfig    `json:"upstream"`
+	Retry        RetryConfig       `json:"retry"`
+	Models       ModelsConfig      `json:"models"`
+	Performance  PerformanceConfig `json:"performance"`
+	Logging      LoggingConfig     `json:"logging"`
 
 	effectiveProxies []string
 }
 
 type UpstreamConfig struct {
-	Zen string `json:"zen"`
+	Kilo string `json:"kilo"`
+	Zen  string `json:"zen,omitempty"`
+}
+
+const defaultKiloGateway = "https://api.kilo.ai/api/gateway"
+
+// UpstreamURL returns the configured Kilo gateway URL.  The legacy zen field
+// is used only when a migrated config has no kilo field.
+func (cfg Config) UpstreamURL() string {
+	if strings.TrimSpace(cfg.Upstream.Kilo) != "" {
+		return strings.TrimSpace(cfg.Upstream.Kilo)
+	}
+	return strings.TrimSpace(cfg.Upstream.Zen)
 }
 
 type RetryConfig struct {
@@ -72,10 +89,10 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	cfg := Config{
-		// opencode2dsh defaults: loopback-only random port, anonymous lane on.
+		// kilo2dsh defaults: loopback-only random port, anonymous lane on.
 		Listen:      "127.0.0.1:0",
 		Anonymous:   true,
-		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen"},
+		Upstream:    UpstreamConfig{Kilo: defaultKiloGateway},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
 		Models:      ModelsConfig{RefreshSeconds: 300},
 		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15},
@@ -89,6 +106,23 @@ func LoadConfig(path string) (Config, error) {
 	if err := ensureJSONEOF(dec); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// json.Decoder merges into the defaults above. Inspect the raw upstream
+	// object so a legacy config containing only `upstream.zen` can override the
+	// default Kilo URL instead of being silently ignored.
+	var raw struct {
+		Upstream *struct {
+			Kilo *string `json:"kilo"`
+			Zen  *string `json:"zen"`
+		} `json:"upstream"`
+	}
+	if err := json.Unmarshal(data, &raw); err == nil && raw.Upstream != nil {
+		switch {
+		case raw.Upstream.Kilo != nil:
+			cfg.Upstream.Kilo = *raw.Upstream.Kilo
+		case raw.Upstream.Zen != nil:
+			cfg.Upstream.Kilo = *raw.Upstream.Zen
+		}
+	}
 	return NormalizeConfig(path, cfg)
 }
 
@@ -96,6 +130,7 @@ func LoadConfig(path string) (Config, error) {
 // either the JSON file or the authenticated management API.
 func NormalizeConfig(path string, cfg Config) (Config, error) {
 	trimList(&cfg.ServerKeys)
+	trimList(&cfg.KiloKeys)
 	trimList(&cfg.ZenKeys)
 	trimList(&cfg.GoKeys)
 	cfg.ProxyFile = strings.TrimSpace(cfg.ProxyFile)
@@ -108,15 +143,21 @@ func NormalizeConfig(path string, cfg Config) (Config, error) {
 	if !isLoopbackListen(cfg.Listen) {
 		return Config{}, fmt.Errorf("listen must bind a loopback address (127.0.0.1, ::1, or localhost), got %q", cfg.Listen)
 	}
-	// opencode2dsh is the anonymous lane only: the authenticated upstream
-	// fallback (zen_keys/go_keys) is intentionally not configurable here.
+	// kilo2dsh is the anonymous lane only: authenticated upstream fallback keys
+	// are intentionally not configurable here. `anonymous_key` is optional and
+	// defaults to empty, which means no Authorization header is sent.
 	if !cfg.Anonymous {
-		return Config{}, errors.New("anonymous must be true; opencode2dsh does not configure upstream keys")
+		return Config{}, errors.New("anonymous must be true; kilo2dsh does not configure upstream keys")
 	}
+	if strings.TrimSpace(cfg.Upstream.Kilo) == "" && strings.TrimSpace(cfg.Upstream.Zen) != "" {
+		cfg.Upstream.Kilo = cfg.Upstream.Zen
+	}
+	cfg.Upstream.Kilo = strings.TrimSpace(cfg.Upstream.Kilo)
 	cfg.Upstream.Zen = strings.TrimSpace(cfg.Upstream.Zen)
-	u, err := url.Parse(strings.TrimSpace(cfg.Upstream.Zen))
+	cfg.AnonymousKey = strings.TrimSpace(cfg.AnonymousKey)
+	u, err := url.Parse(cfg.Upstream.Kilo)
 	if err != nil || u.Host == "" || (strings.ToLower(u.Scheme) != "http" && strings.ToLower(u.Scheme) != "https") {
-		return Config{}, errors.New("upstream.zen must be an http or https URL")
+		return Config{}, errors.New("upstream.kilo must be an http or https URL")
 	}
 	if len(cfg.ServerKeys) == 0 {
 		return Config{}, errors.New("server_keys must contain at least one local key")
@@ -153,7 +194,7 @@ func NormalizeConfig(path string, cfg Config) (Config, error) {
 	return cfg, nil
 }
 
-// isLoopbackListen enforces the opencode2dsh invariant that the agent never
+// isLoopbackListen enforces the kilo2dsh invariant that the agent never
 // exposes a non-loopback interface. The 127.0.0.0/8 range, ::1, and localhost
 // are accepted.
 func isLoopbackListen(listen string) bool {
@@ -287,6 +328,11 @@ func resolveProxyFiles(configPath string, cfg *Config) error {
 // config.json.bak. The temporary file is created beside the target so the
 // final rename stays on the same filesystem.
 func SaveConfigAtomic(path string, cfg Config) error {
+	// Never write deprecated Zen compatibility fields back into a current
+	// config. They remain accepted on read so an existing sidecar can migrate
+	// without a manual edit, but all newly persisted state is Kilo-only.
+	cfg.ZenKeys = nil
+	cfg.Upstream.Zen = ""
 	cfg.effectiveProxies = nil
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

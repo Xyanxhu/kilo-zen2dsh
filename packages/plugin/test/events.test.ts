@@ -13,7 +13,7 @@ function event(message: Record<string, unknown>): PiEvent {
     type: 'done',
     message: {
       api: 'openai-completions',
-      provider: 'opencode2dsh',
+      provider: 'kilo2dsh',
       model: 'qwen-free',
       content: [{ type: 'text', text: 'hi' }],
       usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },

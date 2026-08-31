@@ -114,7 +114,7 @@ function toPiAssistant(message: HarnessMessage, providerId: string): Extract<PiM
         content.push({ type: 'toolCall', id: block.id, name: block.name, arguments: parseArguments(block.arguments) })
         break
       case 'image':
-        throw new Error('opencode2dsh: assistant image output cannot be replayed to a text-only model')
+        throw new Error('kilo2dsh: assistant image output cannot be replayed to a text-only model')
       default:
         break
     }

@@ -1,19 +1,19 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 
 import { ModelCatalog, defaultCachePath, type CatalogSnapshot } from './adapter/catalog.ts'
-import { ZenAdapter, PROVIDER_ID } from './adapter/zen-adapter.ts'
+import { KiloAdapter } from './adapter/kilo-adapter.ts'
 import { AgentProcess, type ReadyInfo } from './agent-process.js'
-import { configPaths, ensureToken, resolveConfig, writeAgentConfig, type Opencode2dshConfig } from './config.js'
+import { configPaths, ensureToken, resolveConfig, writeAgentConfig, type Kilo2dshConfig } from './config.js'
 import { fetchHealth, fetchModels, registerProvider, removeProviderRoute } from './provider.js'
 
 /**
- * opencode2dsh DSH cordis plugin entry.
+ * kilo2dsh DSH cordis plugin entry.
  *
  * Two modes (config.mode, default `adapter`):
- *  - adapter: register a DSH LlmAdapter streaming directly from the Zen
+ *  - adapter: register a DSH LlmAdapter streaming directly from the Kilo
  *    anonymous lane (marketplace shape: no child process, no binary).
  *  - sidecar (legacy/dev): prepare data dir + token + agent-config.json,
  *    spawn the Go agent, wait for READY, register the llm-pi-ai provider
@@ -37,9 +37,9 @@ interface PluginContext {
   effect?(fn: () => () => void): unknown
 }
 
-export const name = 'opencode2dsh'
+export const name = 'kilo2dsh'
 export const inject = ['llm', 'credentials', 'settings'] as const
-export function apply(ctx: PluginContext, config: Opencode2dshConfig = {}): { ready: Promise<ReadyInfo> } {
+export function apply(ctx: PluginContext, config: Kilo2dshConfig = {}): { ready: Promise<ReadyInfo> } {
   if (resolveConfig(config).mode === 'sidecar') return applySidecar(ctx, config)
   return applyAdapter(ctx, config)
 }
@@ -49,58 +49,72 @@ export function apply(ctx: PluginContext, config: Opencode2dshConfig = {}): { re
  * is disposed with the plugin fiber (registerAdapter uses ctx.effect
  * internally); we only own the catalog refresh loop here.
  */
-function applyAdapter(ctx: PluginContext, config: Opencode2dshConfig): { ready: Promise<{ port: number; version: string }> } {
+function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Promise<{ port: number; version: string }> } {
   const logger = ctx.logger
   const cfg = resolveConfig(config)
   const ready = Promise.resolve({ port: 0, version: 'adapter' })
 
   if (!ctx.llm || typeof ctx.llm.registerAdapter !== 'function') {
-    logger.error('opencode2dsh: llm service unavailable; adapter mode cannot register')
+    logger.error('kilo2dsh: llm service unavailable; adapter mode cannot register')
     return { ready }
   }
 
   // Health snapshot for adapter mode (the agent-mode healthz equivalent):
   // written after every refresh round so field diagnostics do not depend on
   // terminal access to the DSH process.
-  const dataDir = join(homedir(), '.opencode2dsh')
+  const dataDir = join(homedir(), '.kilo2dsh')
   const statusPath = join(dataDir, 'adapter-status.json')
   const writeStatus = (status: CatalogSnapshot, lastError: string): void => {
-    void writeFile(
-      statusPath,
-      JSON.stringify({ ...status, lastError, writtenAt: new Date().toISOString() }, null, 2),
-      'utf8',
-    ).catch(() => {})
+    void mkdir(dataDir, { recursive: true })
+      .then(() =>
+        writeFile(
+          statusPath,
+          JSON.stringify({ ...status, lastError, writtenAt: new Date().toISOString() }, null, 2),
+          'utf8',
+        ),
+      )
+      .catch(() => {})
   }
 
+  const upstreamApiKey = cfg.upstreamApiKeyEnv ? process.env[cfg.upstreamApiKeyEnv]?.trim() || undefined : undefined
   const catalog = new ModelCatalog({
     refreshSeconds: cfg.refreshSeconds,
     cachePath: defaultCachePath(dataDir),
+    gatewayBaseUrl: cfg.gatewayBaseUrl,
+    apiKey: upstreamApiKey,
+    anonymousKey: cfg.anonymousKey,
+    requireTools: cfg.requireTools,
     onRefresh: (status, lastError) => {
       writeStatus(status, lastError)
-      if (lastError) logger.warn(`opencode2dsh: catalog refresh issue: ${lastError}`)
+      if (lastError) logger.warn(`kilo2dsh: catalog refresh issue: ${lastError}`)
     },
   })
-  const adapter = new ZenAdapter(catalog)
+  const adapter = new KiloAdapter(catalog, {
+    providerId: cfg.providerId,
+    gatewayBaseUrl: cfg.gatewayBaseUrl,
+    apiKey: upstreamApiKey,
+    anonymousKey: cfg.anonymousKey,
+  })
 
   // Register immediately: the provider must appear in the selector right
   // away, even while the catalog is still warming up (listModels is read
   // live at selector time, so models appear as refreshes land).
-  ctx.llm.registerAdapter([PROVIDER_ID], adapter)
-  logger.info(`opencode2dsh: adapter registered for "${PROVIDER_ID}" (catalog warms up in background)`)
+  ctx.llm.registerAdapter([cfg.providerId], adapter)
+  logger.info(`kilo2dsh: adapter registered for "${cfg.providerId}" (catalog warms up in background)`)
   void catalog.start().catch((err) => {
-    logger.error(`opencode2dsh: catalog start failed: ${err instanceof Error ? err.message : String(err)}`)
+    logger.error(`kilo2dsh: catalog start failed: ${err instanceof Error ? err.message : String(err)}`)
   })
 
-  // A sidecar leftover (llm-pi-ai.providers.opencode2dsh pointing at a dead
+  // A sidecar leftover (llm-pi-ai.providers.kilo2dsh pointing at a dead
   // local port) would shadow the adapter registration and fail every dispatch
   // with a connection error. Remove it before the route can be used.
   if (ctx.settings) {
     removeProviderRoute({ settings: ctx.settings }, cfg.providerId)
       .then((removed) => {
-        if (removed) logger.info(`opencode2dsh: removed stale sidecar route for "${cfg.providerId}" from llm-pi-ai settings`)
+        if (removed) logger.info(`kilo2dsh: removed stale sidecar route for "${cfg.providerId}" from llm-pi-ai settings`)
       })
       .catch((err) => {
-        logger.warn(`opencode2dsh: stale route cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
+        logger.warn(`kilo2dsh: stale route cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
       })
   }
 
@@ -113,9 +127,9 @@ function applyAdapter(ctx: PluginContext, config: Opencode2dshConfig): { ready: 
   return { ready }
 }
 
-function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: Promise<ReadyInfo> } {
+function applySidecar(ctx: PluginContext, config: Kilo2dshConfig): { ready: Promise<ReadyInfo> } {
   const cfg = resolveConfig(config)
-  const paths = configPaths(join(homedir(), '.opencode2dsh'))
+  const paths = configPaths(join(homedir(), '.kilo2dsh'))
   const logger = ctx.logger
 
   let agent: AgentProcess | null = null
@@ -148,7 +162,7 @@ function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: 
       }
       await new Promise((r) => setTimeout(r, 300))
     }
-    logger.warn('opencode2dsh: catalog still pending after timeout; registering whatever the agent exposes now')
+    logger.warn('kilo2dsh: catalog still pending after timeout; registering whatever the agent exposes now')
   }
 
   async function refreshModels(info: ReadyInfo, token: string, { waitReady = false } = {}): Promise<void> {
@@ -167,10 +181,10 @@ function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: 
           models,
         )
       } else {
-        logger.warn('opencode2dsh: credentials/settings services unavailable; provider route not registered')
+        logger.warn('kilo2dsh: credentials/settings services unavailable; provider route not registered')
       }
     } catch (err) {
-      logger.warn(`opencode2dsh: model refresh failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger.warn(`kilo2dsh: model refresh failed: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -186,7 +200,13 @@ function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: 
 
   async function startOnce(): Promise<ReadyInfo> {
     const token = await ensureToken(paths)
-    await writeAgentConfig(paths, { token, refreshSeconds: cfg.refreshSeconds })
+    const upstreamApiKey = cfg.upstreamApiKeyEnv ? process.env[cfg.upstreamApiKeyEnv]?.trim() || undefined : undefined
+    await writeAgentConfig(paths, {
+      token,
+      refreshSeconds: cfg.refreshSeconds,
+      gatewayBaseUrl: cfg.gatewayBaseUrl,
+      anonymousKey: upstreamApiKey ?? cfg.anonymousKey,
+    })
     const binary = cfg.agentPath ?? defaultAgentPath()
     agent = new AgentProcess(binary, ['--config', paths.configPath, '--print-ready', ...(cfg.agentArgs ?? [])], {
       restartDelayMs: cfg.restartDelayMs,
@@ -195,13 +215,13 @@ function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: 
       onLog,
     })
     agent.on('exit-restart', (delay, crashes) => {
-      logger.warn(`opencode2dsh: agent exited unexpectedly; restarting in ${delay}ms (attempt ${crashes})`)
+      logger.warn(`kilo2dsh: agent exited unexpectedly; restarting in ${delay}ms (attempt ${crashes})`)
     })
     agent.on('circuit-tripped', (crashes) => {
-      logger.error(`opencode2dsh: agent crashed ${crashes} times consecutively; giving up`)
+      logger.error(`kilo2dsh: agent crashed ${crashes} times consecutively; giving up`)
     })
     agent.on('state', (state) => {
-      if (state === 'ready') logger.info('opencode2dsh: agent ready')
+      if (state === 'ready') logger.info('kilo2dsh: agent ready')
     })
     const info = await agent.start()
     readyResolve(info)
@@ -211,7 +231,7 @@ function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: 
   }
 
   void startOnce().catch((err) => {
-    logger.error(`opencode2dsh: failed to start agent: ${err instanceof Error ? err.message : String(err)}`)
+    logger.error(`kilo2dsh: failed to start agent: ${err instanceof Error ? err.message : String(err)}`)
   })
 
   // Register disposer on the plugin fiber so reload/unload/shutdown reaps the
@@ -244,10 +264,12 @@ function applySidecar(ctx: PluginContext, config: Opencode2dshConfig): { ready: 
  * build; then a bare name on PATH.
  */
 export function defaultAgentPath(): string {
-  const bin = 'opencode2dsh-agent'
+  const bin = 'kilo2dsh-agent'
   const exe = process.platform === 'win32' ? `${bin}.exe` : bin
   const here = __dirnameSafe()
   for (const sibling of [
+    join(here, '..', '..', '..', 'legacy', process.platform === 'win32' ? 'agent.exe' : 'agent'),
+    join(here, '..', '..', 'legacy', process.platform === 'win32' ? 'agent.exe' : 'agent'),
     join(here, '..', '..', '..', 'legacy', 'agent', exe),
     join(here, '..', '..', 'legacy', 'agent', exe),
   ]) {
@@ -267,5 +289,20 @@ function __dirnameSafe(): string {
 }
 
 export { AgentProcess } from './agent-process.js'
-export { configPaths, ensureToken, resolveConfig, writeAgentConfig, type Opencode2dshConfig } from './config.js'
+export { configPaths, ensureToken, resolveConfig, writeAgentConfig, type Kilo2dshConfig, type Opencode2dshConfig } from './config.js'
 export { fetchHealth, fetchModels, registerProvider, providerBaseURL, toPiAiModels, type DshSeams } from './provider.js'
+export {
+  ANONYMOUS_API_KEY,
+  KILO_API_BASE_URL,
+  KILO_GATEWAY_BASE_URL,
+  KILO_MODELS_URL,
+  ZEN_BASE_URL,
+  ModelCatalog,
+  fetchKiloModelCatalog,
+  fetchKiloModels,
+  isFreeModel,
+  staticFreeModels,
+  type KiloModel,
+  type KiloModelInfo,
+} from './adapter/catalog.ts'
+export { KiloAdapter, createKiloAdapter, PROVIDER_ID, type KiloAdapterOptions, type CatalogLike } from './adapter/kilo-adapter.ts'

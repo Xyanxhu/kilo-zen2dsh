@@ -1,21 +1,21 @@
 # Marketplace submission — awesome-dsh-plugin
 
-Draft for the PR that lists opencode2dsh in the dsh-market catalog
+Draft for the PR that lists kilo2dsh in the dsh-market catalog
 ([awesome-dsh-plugin/awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)).
 Format verified against that repo's `contributing.md` (2026-08-29).
 
 ## The entry file
 
-Add exactly one file: `data/plugins/FishBottle7__opencode2dsh.yml`
+Add exactly one file: `data/plugins/Xyanxhu__kilo2dsh.yml`
 (filename = `<owner>__<repo>.yml`).
 
 ```yaml
-url: https://github.com/FishBottle7/opencode2dsh
-name: FishBottle7/opencode2dsh
+url: https://github.com/Xyanxhu/kilo2dsh
+name: Xyanxhu/kilo2dsh
 category: model
 description:
-  en: Exposes OpenCode Zen free models to DeepSeek Harness, with no API key.
-  zh: 将 OpenCode Zen 免费模型接入 DeepSeek Harness，无需 API Key。
+  en: Exposes Kilo Gateway free models to DeepSeek Harness, with no API key.
+  zh: 将 Kilo Gateway 免费模型接入 DeepSeek Harness，无需 API Key。
 ```
 
 Notes on the wording (their review rules):
@@ -32,7 +32,7 @@ Notes on the wording (their review rules):
 - [ ] `dsh.bundle` manifest reachable **from the URL the entry points at**:
       the check reads the `package.json` at the entry URL. The repo ROOT now
       declares `dsh.bundle.patch: ./cordis.patch.yml` plus an npm dependency
-      on `@opencode2dsh/dsh-plugin` (commit 9c21f9e), so the entry points at
+      on `@kilo2dsh/dsh-plugin` (commit 9c21f9e), so the entry points at
       the repository root with no `#` suffix and the npm mapping links.
       History: the first submission pointed at the root but was bounced
       ("root package.json declares no dsh.bundle"), refiled at the
@@ -54,7 +54,7 @@ Notes on the wording (their review rules):
 # 1. fork https://github.com/awesome-dsh-plugin/awesome-dsh-plugin
 # 2. in the fork:
 npm ci
-# 3. add data/plugins/FishBottle7__opencode2dsh.yml with the content above
+# 3. add data/plugins/Xyanxhu__kilo2dsh.yml with the content above
 node scripts/generate-readme.mjs
 # 4. commit the YAML + both regenerated READMEs, open the PR
 ```
@@ -62,30 +62,30 @@ node scripts/generate-readme.mjs
 ## PR title
 
 ```
-Add FishBottle7/opencode2dsh (model)
+Add Xyanxhu/kilo2dsh (model)
 ```
 
 ## PR body
 
 ```markdown
-Adds one entry: `data/plugins/FishBottle7__opencode2dsh.yml`.
+Adds one entry: `data/plugins/Xyanxhu__kilo2dsh.yml`.
 
 **What it does** — registers a native DSH `LlmAdapter` that streams from
-OpenCode Zen's free endpoint (`Authorization: Bearer public`), so the
-free models (big-pickle, hy3-free, ...) appear in the model picker without
-any API key. Catalog comes from the live `/v1/models` list
-intersected with models.dev free-by-metadata, falling back to a disk cache
-and a verified static list; the plugin auto-refreshes and writes a health
-snapshot to `~/.opencode2dsh/adapter-status.json`.
+Kilo Gateway's keyless free endpoint. Discovery uses `GET /api/gateway/models`
+without an Authorization header; completions use
+`POST /api/gateway/chat/completions` and expose only Kilo records marked free
+(including `kilo-auto/free` and `:free` compatibility routes). The plugin
+auto-refreshes the catalog, falls back to a disk cache/static bootstrap list,
+and writes a health snapshot to `~/.kilo2dsh/adapter-status.json`.
 
 **Install source** — published to npm as
-[`@opencode2dsh/dsh-plugin`](https://www.npmjs.com/package/@opencode2dsh/dsh-plugin);
+[`@kilo2dsh/dsh-plugin`](https://www.npmjs.com/package/@kilo2dsh/dsh-plugin);
 its `repository` field points back at the listed repo.
 
 **Manifest** — `packages/plugin/package.json` declares
 `dsh.bundle: { patch: "./cordis.patch.yml" }` (adapter-only; the legacy Go
 sidecar lives in `legacy/` and is not shipped).
 
-- Repo: https://github.com/FishBottle7/opencode2dsh
+- Repo: https://github.com/Xyanxhu/kilo2dsh
 - License: MIT
 ```

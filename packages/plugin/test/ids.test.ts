@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { conversationSeed, deriveRequestIDs, disguiseHeaders, opencodeUserAgent, randomID, stableID } from '../src/adapter/ids.ts'
+import { conversationSeed, deriveRequestIDs, kiloHeaders, kiloUserAgent, randomID, stableID } from '../src/adapter/ids.ts'
 
 test('stableID is deterministic and sha256-truncated', () => {
   const first = stableID('ses', 'hello')
@@ -57,16 +57,13 @@ test('deriveRequestIDs keeps the session stable across turns and randomizes requ
   assert.notEqual(empty.session, deriveRequestIDs([{ role: 'system', content: 'only system' }]).session)
 })
 
-test('disguiseHeaders carries the CLI-identical correlation set', () => {
+test('kiloHeaders carries Kilo correlation headers without CLI spoofing', () => {
   const ids = deriveRequestIDs([{ role: 'user', content: 'hello' }])
-  const headers = disguiseHeaders(ids)
-  assert.equal(headers['user-agent'], opencodeUserAgent())
-  assert.equal(headers['x-opencode-client'], 'cli')
-  assert.equal(headers['x-opencode-session'], ids.session)
-  assert.equal(headers['x-session-affinity'], ids.session)
-  assert.equal(headers['X-Session-Id'], ids.session)
-  assert.equal(headers['x-opencode-request'], ids.request)
-  assert.equal(headers['x-opencode-project'], ids.project)
-  assert.ok(headers['user-agent'].startsWith('opencode/'))
-  assert.ok(headers['user-agent'].includes(process.platform))
+  const headers = kiloHeaders(ids)
+  assert.equal(headers['user-agent'], kiloUserAgent())
+  assert.equal(headers['x-kilocode-editorname'], 'DSH/kilo2dsh')
+  assert.equal(headers['x-kilocode-taskid'], ids.request)
+  assert.equal(headers['x-kilocode-projectid'], ids.project)
+  assert.equal(headers['x-opencode-client'], undefined)
+  assert.ok(headers['user-agent'].startsWith('kilo2dsh'))
 })

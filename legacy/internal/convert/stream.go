@@ -102,7 +102,7 @@ func (parser *bridgeStreamParser) Parse(eventName, data string) ([]bridgeStreamE
 	case ProtocolChat:
 		return parser.parseChat(value), nil
 	default:
-		return nil, fmt.Errorf("unsupported stream protocol %q in opencode2dsh", parser.protocol)
+		return nil, fmt.Errorf("unsupported stream protocol %q in kilo2dsh", parser.protocol)
 	}
 }
 
@@ -267,7 +267,7 @@ func mergeBridgeUsage(destination *BridgeUsage, source BridgeUsage) {
 
 // errNoTranscode marks the not-ported cross-protocol stream path; callers
 // surface it as a 502 upstream_error per design.md 6.2.
-var errNoTranscode = errors.New("cross-protocol stream transcoding is not available in opencode2dsh")
+var errNoTranscode = errors.New("cross-protocol stream transcoding is not available in kilo2dsh")
 
 // NoTranscode exposes the placeholder error for the gateway.
 func NoTranscode() error { return errNoTranscode }

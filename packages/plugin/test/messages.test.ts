@@ -13,7 +13,7 @@ function expectRole(message: PiMessage | undefined, role: PiMessage['role']): Pi
 }
 
 function options(overrides: Partial<HarnessGenerateOptions> = {}): HarnessGenerateOptions {
-  return { provider: 'opencode2dsh', model: 'qwen-free', messages: [], ...overrides }
+  return { provider: 'kilo2dsh', model: 'qwen-free', messages: [], ...overrides }
 }
 
 test('system messages become leading user text', () => {
@@ -81,7 +81,7 @@ test('assistant history replays text, thinking and tool calls with parsed argume
         { type: 'reasoning', text: 'internal scratch' },
         { type: 'tool-call', id: 't1', name: 'calc', arguments: '{"a":1}' },
       ],
-      source: { kind: 'model', provider: 'opencode2dsh', model: 'qwen-free' },
+      source: { kind: 'model', provider: 'kilo2dsh', model: 'qwen-free' },
     },
   ]
   const context = toPiContext(options({ messages }))

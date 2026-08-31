@@ -1,87 +1,68 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { decodeModelsDev, decide, fetchZenModels, isFreeModel, ModelCatalog, staticFreeModels } from '../src/adapter/catalog.ts'
-import { opencodeUserAgent } from '../src/adapter/ids.ts'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  decodeKiloModels,
+  decodeModelsDev,
+  decide,
+  fetchKiloModelCatalog,
+  fetchKiloModels,
+  isFreeModel,
+  KILO_GATEWAY_BASE_URL,
+  ModelCatalog,
+  staticFreeModels,
+} from '../src/adapter/catalog.ts'
 
-function price(input?: number, output?: number, deprecated = false) {
-  return { input, output, deprecated }
+function price(input?: number, output?: number, deprecated = false, free?: boolean) {
+  return { input, output, deprecated, ...(free === undefined ? {} : { free }) }
 }
 
-test('isFreeModel keys on the name', () => {
-  assert.ok(isFreeModel('hy3-free'))
-  assert.ok(isFreeModel('BIG-PICKLE-FREE'))
-  assert.ok(!isFreeModel('qwen3-max'))
+test('Kilo free detection prefers explicit flags and handles virtual/suffix routes', () => {
+  assert.ok(isFreeModel('kilo-auto/free'))
+  assert.ok(isFreeModel('openrouter/free'))
+  assert.ok(isFreeModel('provider/model:free'))
+  assert.ok(isFreeModel('provider-model-free'))
+  assert.ok(isFreeModel({ id: 'paid-looking-free', isFree: true }))
+  assert.ok(isFreeModel({ id: 'legacy-free', is_free: true }))
+  assert.ok(!isFreeModel({ id: 'paid-free', isFree: false }))
+  assert.ok(!isFreeModel({ id: 'qwen3-max', isFree: false }))
+  assert.equal(isFreeModel({ id: 'camel-wins:free', isFree: false, is_free: true }), false)
+  assert.equal(isFreeModel('provider/free'), false)
 })
 
-test('decide follows the model_metadata.go matrix', () => {
-  // metadata pending: free-named pass, others blocked, nothing known
-  assert.deepEqual(decide('x-free', new Map(), false), { allowed: true, source: 'name_free', known: false })
+test('decodeKiloModels validates records and deduplicates IDs', () => {
+  const models = decodeKiloModels({ data: [{ id: 'a' }, { id: 'a', name: 'duplicate' }, null, { name: 'missing-id' }] })
+  assert.deepEqual(models.map((model) => model.id), ['a'])
+  assert.equal(models[0]?.name, 'a')
+  assert.deepEqual(decodeKiloModels({ data: [] }), [])
+})
+
+test('compatibility decoder accepts a Kilo response and preserves costs', () => {
+  const prices = decodeModelsDev({
+    data: [
+      { id: 'kilo-auto/free', isFree: true, pricing: { prompt: 0, completion: 0 } },
+      { id: 'not-free:free', isFree: false, pricing: { prompt: 0, completion: 0 } },
+    ],
+  })
+  assert.deepEqual(prices.get('kilo-auto/free'), price(0, 0, false, true))
+  assert.equal(decide('not-free:free', prices, true).allowed, false)
+})
+
+test('decide compatibility helper remains conservative while catalog is pending', () => {
+  assert.deepEqual(decide('x-free', new Map(), false), { allowed: true, source: 'name_free_pending', known: false })
   assert.deepEqual(decide('paid', new Map(), false), { allowed: false, source: 'metadata_pending', known: false })
-  assert.deepEqual(decide('paid', new Map(), true), { allowed: false, source: 'metadata_pending', known: false })
-  // ready but model absent
-  assert.deepEqual(decide('paid', new Map([['other', price(0, 0)]]), true), {
-    allowed: false,
-    source: 'metadata_model_missing',
-    known: false,
-  })
-  // free by name alone
-  assert.deepEqual(decide('x-free', new Map([['x-free', price(1, 1)]]), true), {
-    allowed: true,
-    source: 'name_free',
-    known: true,
-  })
-  // free by metadata alone
-  assert.deepEqual(decide('qwen', new Map([['qwen', price(0, 0)]]), true), {
+  assert.deepEqual(decide('free', new Map([['free', price(0, 0)]]), true), {
     allowed: true,
     source: 'metadata_free',
     known: true,
   })
-  // free by both
-  assert.deepEqual(decide('q-free', new Map([['q-free', price(0, 0)]]), true), {
-    allowed: true,
-    source: 'name_and_metadata_free',
-    known: true,
-  })
-  // paid and deprecated
   assert.deepEqual(decide('paid', new Map([['paid', price(1, 2)]]), true), {
     allowed: false,
     source: 'metadata_paid',
     known: true,
   })
-  assert.deepEqual(decide('old', new Map([['old', price(0, 0, true)]]), true), {
-    allowed: false,
-    source: 'metadata_deprecated',
-    known: true,
-  })
-  // partial pricing has an unknown side -> blocked and not known
-  assert.deepEqual(decide('half', new Map([['half', price(0)]]), true), {
-    allowed: false,
-    source: 'metadata_cost_unknown',
-    known: false,
-  })
-})
-
-test('decodeModelsDev prefers the opencode provider section and parses costs', () => {
-  const payload = {
-    'openai': { models: { gpt: { cost: { input: 5, output: 10 } } } },
-    'opencode': {
-      models: {
-        'qwen3-coder-next': { cost: { input: 0, output: 0 } },
-        'claude-max': { id: 'claude-max', cost: { input: 1.5, output: 7.5 } },
-        retired: { status: 'deprecated', cost: { input: 0, output: 0 } },
-        ambiguous: { cost: {} },
-      },
-    },
-  }
-  const prices = decodeModelsDev(payload)
-  assert.equal(prices.size, 4)
-  assert.deepEqual(prices.get('qwen3-coder-next'), price(0, 0))
-  assert.deepEqual(prices.get('claude-max'), price(1.5, 7.5))
-  assert.equal(prices.get('retired')?.deprecated, true)
-  assert.deepEqual(prices.get('ambiguous'), price(undefined, undefined, false))
-  // no opencode section anywhere -> empty
-  assert.equal(decodeModelsDev({ openai: {} }).size, 0)
-  assert.equal(decodeModelsDev(null).size, 0)
 })
 
 function fakeFetch(routes: Record<string, unknown>, capture: { url?: string; init?: RequestInit } = {}) {
@@ -89,83 +70,111 @@ function fakeFetch(routes: Record<string, unknown>, capture: { url?: string; ini
     capture.url = String(url)
     capture.init = init
     const key = String(url).replace(/\?.*$/, '')
+    if (!(key in routes) && !('*' in routes)) return new Response('{}', { status: 404 })
     const body = routes[key] ?? routes['*']
     if (body instanceof Error) throw body
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
   }) as typeof fetch
 }
 
-const zenBody = { data: [{ id: 'qwen-free' }, { id: 'paid-model' }, { id: 'ghost-free' }] }
-const metadataBody = {
-  opencode: {
-    models: {
-      'qwen-free': { cost: { input: 0, output: 0 } },
-      'paid-model': { cost: { input: 1, output: 2 } },
-      'ghost-free': { cost: { input: 3, output: 4 } },
-    },
-  },
+const kiloBody = {
+  data: [
+    { id: 'kilo-auto/free', name: 'Auto Free', isFree: true, supported_parameters: ['tools'], architecture: { output_modalities: ['text'] } },
+    { id: 'stepfun/step-3.7-flash:free', isFree: true, supported_parameters: ['tools'], architecture: { output_modalities: ['text'] } },
+    { id: 'paid-model', isFree: false, pricing: { prompt: 1, completion: 2 }, supported_parameters: ['tools'] },
+  ],
 }
 
-test('start() fast-retries while the live catalog is empty, then settles into the cadence', async () => {
-  let zenCalls = 0
-  const flaky = (async (url: string | URL) => {
-    if (String(url).includes('/v1/models')) {
-      zenCalls += 1
-      if (zenCalls <= 2) throw new Error('network not ready yet')
-      return new Response(JSON.stringify(zenBody), { status: 200, headers: { 'content-type': 'application/json' } })
-    }
-    return new Response(JSON.stringify(metadataBody), { status: 200, headers: { 'content-type': 'application/json' } })
+test('fetchKiloModels uses /models and sends no Authorization by default', async () => {
+  const capture: { url?: string; init?: RequestInit } = {}
+  const ids = await fetchKiloModels(KILO_GATEWAY_BASE_URL, fakeFetch({ [`${KILO_GATEWAY_BASE_URL}/models`]: kiloBody }, capture))
+  assert.deepEqual(ids, ['kilo-auto/free', 'stepfun/step-3.7-flash:free', 'paid-model'])
+  assert.equal(capture.url, `${KILO_GATEWAY_BASE_URL}/models`)
+  const headers = new Headers(capture.init?.headers)
+  assert.equal(headers.get('authorization'), null)
+  assert.equal(headers.get('user-agent'), 'kilo2dsh')
+})
+
+test('fetchKiloModelCatalog sends Authorization only for an explicit token', async () => {
+  const capture: { url?: string; init?: RequestInit } = {}
+  await fetchKiloModelCatalog(`${KILO_GATEWAY_BASE_URL}/models`, fakeFetch({ [`${KILO_GATEWAY_BASE_URL}/models`]: kiloBody }, capture), { apiKey: 'account-token' })
+  assert.equal(new Headers(capture.init?.headers).get('authorization'), 'Bearer account-token')
+})
+
+test('start() retries Kilo catalog discovery while the live list is unavailable', async () => {
+  let calls = 0
+  const flaky = (async () => {
+    calls += 1
+    if (calls <= 2) throw new Error('network not ready yet')
+    return new Response(JSON.stringify(kiloBody), { status: 200, headers: { 'content-type': 'application/json' } })
   }) as typeof fetch
   const catalog = new ModelCatalog({ fetchImpl: flaky, startupRetryMs: 5, refreshSeconds: 3600 })
   try {
     await catalog.start()
+    assert.equal(calls, 3)
+    assert.equal(catalog.snapshot().status, 'ready')
     assert.equal(catalog.snapshot().total, 3)
-    assert.equal(zenCalls, 3, 'two failed attempts then one success')
-    assert.equal(catalog.snapshot().status, 'ready')
   } finally {
     catalog.stop()
   }
 })
 
-test('fetchZenModels sends the anonymous CLI disguise and parses ids', async () => {
-  const capture: { url?: string; init?: RequestInit } = {}
-  const ids = await fetchZenModels('https://opencode.ai/zen/', fakeFetch({ 'https://opencode.ai/zen/v1/models': zenBody }, capture), opencodeUserAgent())
-  assert.deepEqual(ids, ['qwen-free', 'paid-model', 'ghost-free'])
-  assert.equal(capture.url, 'https://opencode.ai/zen/v1/models')
-  const headers = new Headers(capture.init?.headers)
-  assert.equal(headers.get('authorization'), 'Bearer public')
-  assert.equal(headers.get('x-opencode-client'), 'cli')
-  assert.ok(headers.get('user-agent')?.startsWith('opencode/'))
-  await assert.rejects(
-    fetchZenModels('https://opencode.ai/zen', fakeFetch({ 'https://opencode.ai/zen/v1/models': { data: [] } }), opencodeUserAgent()),
-    /empty list/,
-  )
-})
-
-test('ModelCatalog intersects the live catalog with free decisions', async () => {
-  const catalog = new ModelCatalog({ fetchImpl: fakeFetch({ 'https://opencode.ai/zen/v1/models': zenBody, 'https://models.dev/api.json': metadataBody }) })
+test('ModelCatalog exposes only explicit free text/tool-capable Kilo models', async () => {
+  const body = {
+    data: [
+      { id: 'free-tool', isFree: true, supported_parameters: ['tools'], architecture: { output_modalities: ['text'] } },
+      { id: 'suffix-free:free', supported_parameters: ['tools'], architecture: { output_modalities: ['text'] } },
+      { id: 'snake-free', is_free: true, supported_parameters: ['tools'], architecture: { output_modalities: ['text'] } },
+      { id: 'paid', isFree: false, supported_parameters: ['tools'] },
+      { id: 'free-without-tools', isFree: true, supported_parameters: ['reasoning'] },
+      { id: 'free-image', isFree: true, supported_parameters: ['tools'], architecture: { output_modalities: ['image'] } },
+    ],
+  }
+  const catalog = new ModelCatalog({ fetchImpl: fakeFetch({ [`${KILO_GATEWAY_BASE_URL}/models`]: body }) })
+  await catalog.refreshOnce()
   try {
-    await catalog.refreshOnce()
-    assert.deepEqual(catalog.list(), ['ghost-free', 'qwen-free'], 'paid-model is filtered out')
-    assert.equal(catalog.decision('paid-model').allowed, false)
-    assert.equal(catalog.snapshot().status, 'ready')
-    assert.equal(catalog.snapshot().exposed, 2)
+    assert.deepEqual(catalog.list(), ['free-tool', 'snake-free', 'suffix-free:free'])
+    assert.equal(catalog.decision('paid').allowed, false)
+    assert.equal(catalog.decision('free-without-tools').source, 'catalog_tools_unsupported')
+    assert.equal(catalog.decision('free-image').source, 'catalog_output_unsupported')
+    assert.equal(catalog.snapshot().total, 6)
+    assert.equal(catalog.snapshot().exposed, 3)
   } finally {
     catalog.stop()
   }
 })
 
-test('ModelCatalog falls back to static ids while the live catalog is pending', async () => {
+test('ModelCatalog falls back to static Kilo IDs while discovery is pending', async () => {
   const fail = (async () => {
     throw new Error('network down')
   }) as typeof fetch
   const catalog = new ModelCatalog({ fetchImpl: fail })
   await catalog.refreshOnce()
   assert.deepEqual(catalog.list(), staticFreeModels)
-  // static ids are verified upstream: allowed even without metadata
-  assert.equal(catalog.decision('big-pickle').allowed, true)
-  assert.equal(catalog.decision('big-pickle').source, 'static_verified')
+  assert.equal(catalog.decision(staticFreeModels[0]!).allowed, true)
   assert.equal(catalog.decision('unknown-model').allowed, false)
-  assert.equal(catalog.snapshot().status, 'pending')
+  assert.equal(catalog.snapshot().status, 'error')
   catalog.stop()
+})
+
+test('ModelCatalog restores a fresh Kilo cache when discovery is unavailable', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'kilo2dsh-cache-'))
+  try {
+    const cachePath = join(dir, 'kilo-models.json')
+    const live = new ModelCatalog({ cachePath, fetchImpl: fakeFetch({ [`${KILO_GATEWAY_BASE_URL}/models`]: kiloBody }), now: () => 1_000 })
+    await live.refreshOnce()
+    live.stop()
+
+    const unavailable = (async () => {
+      throw new Error('offline')
+    }) as typeof fetch
+    const cached = new ModelCatalog({ cachePath, fetchImpl: unavailable, now: () => 1_000 + 60_000 })
+    await cached.refreshOnce()
+    assert.equal(cached.get('kilo-auto/free')?.isFree, true)
+    assert.equal(cached.snapshot().status, 'ready')
+    assert.match(cached.lastError, /offline/)
+    cached.stop()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

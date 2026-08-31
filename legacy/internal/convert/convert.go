@@ -1,7 +1,7 @@
 // Package convert ports opencode2api convert.go/stream.go, trimmed to the
 // Chat<->Chat identity path plus the SSE usage observer. The cross-protocol
 // bridge (Responses/Anthropic encoders, stream emitter) is intentionally left
-// as an interface stub: opencode2dsh speaks Chat end to end (design.md 6.3).
+// as an interface stub: kilo2dsh speaks Chat end to end (design.md 6.3).
 package convert
 
 import (
@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"opencode2dsh/agent/internal/catalog"
+	"kilo2dsh/agent/internal/catalog"
 )
 
 const toolReasoningPlaceholder = "tool call"
@@ -30,12 +30,12 @@ type BridgeUsage struct {
 }
 
 // ConvertRequest keeps the upstream same-protocol identity branch. Cross
-// protocol conversion is an interface placeholder in opencode2dsh.
+// protocol conversion is an interface placeholder in kilo2dsh.
 func ConvertRequest(from, to Protocol, input map[string]any) (map[string]any, error) {
 	if from == to {
 		return cloneMap(input), nil
 	}
-	return nil, fmt.Errorf("protocol conversion %s->%s is not available in opencode2dsh", from, to)
+	return nil, fmt.Errorf("protocol conversion %s->%s is not available in kilo2dsh", from, to)
 }
 
 // PrepareUpstreamRequest is the single request preparation path for both

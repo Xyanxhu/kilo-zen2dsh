@@ -1,3 +1,3 @@
-module opencode2dsh/agent
+module kilo2dsh/agent
 
 go 1.24

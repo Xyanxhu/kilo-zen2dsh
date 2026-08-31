@@ -9,6 +9,9 @@ test('resolveConfig fills defaults and keeps overrides', () => {
   const base = resolveConfig()
   assert.equal(base.providerId, defaults.providerId)
   assert.equal(base.apiKeyEnv, defaults.apiKeyEnv)
+  assert.equal(base.gatewayBaseUrl, 'https://api.kilo.ai/api/gateway')
+  assert.equal(base.anonymousKey, '')
+  assert.equal(base.upstreamApiKeyEnv, '')
   assert.equal(base.restartMaxDelayMs, 60000)
   const custom = resolveConfig({ providerId: 'x', refreshSeconds: 60 })
   assert.equal(custom.providerId, 'x')
@@ -36,7 +39,7 @@ test('ensureToken persists and reuses one token', async () => {
   }
 })
 
-test('writeAgentConfig emits the design.md section 8.3 template', async () => {
+test('writeAgentConfig emits a keyless Kilo gateway config', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'o2ds-cfg-'))
   try {
     const paths = configPaths(dir)
@@ -45,9 +48,10 @@ test('writeAgentConfig emits the design.md section 8.3 template', async () => {
     assert.equal(parsed.listen, '127.0.0.1:0')
     assert.deepEqual(parsed.server_keys, ['tok-1'])
     assert.equal(parsed.anonymous, true)
-    assert.deepEqual(parsed.zen_keys, [])
+    assert.deepEqual(parsed.kilo_keys, [])
     assert.deepEqual(parsed.go_keys, [])
-    assert.equal(parsed.upstream.zen, 'https://opencode.ai/zen')
+    assert.equal(parsed.upstream.kilo, 'https://api.kilo.ai/api/gateway')
+    assert.equal(parsed.anonymous_key, '')
     assert.equal(parsed.models.refresh_seconds, 300)
     assert.deepEqual(parsed.proxies, ['direct'])
     // rewrite with new values replaces atomically

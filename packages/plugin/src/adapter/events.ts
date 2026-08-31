@@ -191,5 +191,5 @@ export async function* toStreamChunks(events: AsyncIterable<PiEvent>, contextWin
         return
     }
   }
-  throw new Error('opencode2dsh: pi-ai event stream ended without done/error')
+  throw new Error('kilo2dsh: pi-ai event stream ended without done/error')
 }

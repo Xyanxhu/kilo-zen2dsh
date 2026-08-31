@@ -24,8 +24,9 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 // FirstString wraps firstString.
 func FirstString(values ...string) string { return firstString(values...) }
 
-// UserAgent wraps opencodeUserAgent.
-func UserAgent() string { return opencodeUserAgent() }
+// UserAgent identifies the kilo2dsh integration without impersonating another
+// CLI. Keeping this accessor central ensures catalog and chat requests match.
+func UserAgent() string { return kiloUserAgent() }
 
 // The accessors below are copied verbatim from opencode2api convert.go
 // (lines 1792-1858) so package-internal call sites keep their upstream shape.

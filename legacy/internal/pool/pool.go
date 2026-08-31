@@ -1,6 +1,6 @@
 // Package pool ports opencode2api pool.go, trimmed to the transport pool and
 // the anonymous cooldown pool. The authenticated key-node machinery (nodePool,
-// upstreamNode, nodeCursor, proxy rebinding) is not ported: opencode2dsh never
+// upstreamNode, nodeCursor, proxy rebinding) is not ported: kilo2dsh never
 // configures upstream keys. The gray multi-IP rotation stays dormant by
 // default -- proxies=["direct"] is a single node, and MarkFailure then acts as
 // an honest single-exit cooldown/backoff (design.md 9.2).
@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"opencode2dsh/agent/internal/config"
-	"opencode2dsh/agent/internal/ids"
+	"kilo2dsh/agent/internal/config"
+	"kilo2dsh/agent/internal/ids"
 )
 
 type ProxyTransport struct {
@@ -37,9 +37,9 @@ type TransportPool struct {
 	Items []*ProxyTransport
 }
 
-// AnonymousPool gives the shared OpenCode "public" credential an independent
-// cooldown per proxy. Unlike key nodes, anonymous nodes are never rebound:
-// changing proxy is the failover mechanism because Zen rate-limits them by IP.
+// AnonymousPool gives Kilo's keyless lane an independent cooldown per proxy.
+// Unlike key nodes, anonymous nodes are never rebound: changing proxy is the
+// failover mechanism when the gateway rate-limits an exit IP.
 type AnonymousPool struct {
 	nodes    []*AnonymousNode
 	next     atomic.Uint64

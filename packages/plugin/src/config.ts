@@ -3,13 +3,15 @@ import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/pro
 import { dirname, join } from 'node:path'
 import { platform } from 'node:process'
 
+import { ANONYMOUS_API_KEY, KILO_GATEWAY_BASE_URL } from './adapter/catalog.ts'
+
 /**
  * Plugin configuration (cordis config object, injected via cordis.patch.yml).
  */
-export interface Opencode2dshConfig {
+export interface Kilo2dshConfig {
   /**
    * Integration mode. `adapter` (default) registers a DSH LlmAdapter that
-   * streams directly from the Zen anonymous lane — no child process. `sidecar`
+   * streams directly from Kilo's keyless free lane — no child process. `sidecar`
    * (legacy, not bundled with the published package) spawns the Go agent
    * binary and registers an llm-pi-ai route to it; build the agent from
    * legacy/agent and pass agentPath.
@@ -23,6 +25,14 @@ export interface Opencode2dshConfig {
   providerId?: string
   /** Credential reference (env var name) holding the local agent token. */
   apiKeyEnv?: string
+  /** Optional Kilo account/API token env var. Leave unset for anonymous free access. */
+  upstreamApiKeyEnv?: string
+  /** Kilo Gateway base URL, ending in `/api/gateway`. */
+  gatewayBaseUrl?: string
+  /** Anonymous credential accepted by the configured Kilo gateway. */
+  anonymousKey?: string
+  /** Hide models that explicitly do not advertise tool calling. */
+  requireTools?: boolean
   /** Model list refresh interval in seconds (agent refresh_seconds matches). */
   refreshSeconds?: number
   /** Restart backoff: initial delay ms. */
@@ -33,9 +43,18 @@ export interface Opencode2dshConfig {
   maxConsecutiveCrashes?: number
 }
 
+/** @deprecated Use Kilo2dshConfig. */
+export type Opencode2dshConfig = Kilo2dshConfig
+
 export const defaults = {
-  providerId: 'opencode2dsh',
-  apiKeyEnv: 'OPENCODE2DSH_TOKEN',
+  providerId: 'kilo2dsh',
+  apiKeyEnv: 'KILO2DSH_TOKEN',
+  // Empty by default: the Kilo free lane must not accidentally inherit a
+  // user's paid token from the environment. Set this explicitly to opt in.
+  upstreamApiKeyEnv: '',
+  gatewayBaseUrl: KILO_GATEWAY_BASE_URL,
+  anonymousKey: ANONYMOUS_API_KEY,
+  requireTools: true,
   refreshSeconds: 300,
   restartDelayMs: 1000,
   restartMaxDelayMs: 60000,
@@ -43,17 +62,30 @@ export const defaults = {
 }
 
 export type ResolvedConfig = Required<
-  Pick<Opencode2dshConfig, 'providerId' | 'apiKeyEnv' | 'refreshSeconds' | 'restartDelayMs' | 'restartMaxDelayMs' | 'maxConsecutiveCrashes'>
-> & Opencode2dshConfig
+  Pick<
+    Kilo2dshConfig,
+    | 'providerId'
+    | 'apiKeyEnv'
+    | 'upstreamApiKeyEnv'
+    | 'gatewayBaseUrl'
+    | 'anonymousKey'
+    | 'requireTools'
+    | 'refreshSeconds'
+    | 'restartDelayMs'
+    | 'restartMaxDelayMs'
+    | 'maxConsecutiveCrashes'
+  >
+> & Kilo2dshConfig
 
-export function resolveConfig(config: Opencode2dshConfig = {}): ResolvedConfig {
+export function resolveConfig(config: Kilo2dshConfig = {}): ResolvedConfig {
   return { ...defaults, ...config }
 }
 
 /**
  * Everything the plugin persists next to the agent: the generated
  * agent-config.json (design.md section 8.3 template) and the local auth token.
- * The data directory doubles as the models.dev cache location for the agent.
+ * The data directory also stores the Kilo model catalog cache and adapter
+ * health snapshot.
  */
 export interface AgentConfigPaths {
   dataDir: string
@@ -108,7 +140,7 @@ export async function ensureToken(paths: AgentConfigPaths): Promise<string> {
  */
 export async function writeAgentConfig(
   paths: AgentConfigPaths,
-  options: { token: string; refreshSeconds: number },
+  options: { token: string; refreshSeconds: number; gatewayBaseUrl?: string; anonymousKey?: string },
 ): Promise<void> {
   // design.md section 8.3 template; listen 127.0.0.1:0 => random port,
   // discovered via the READY line (--print-ready).
@@ -116,9 +148,10 @@ export async function writeAgentConfig(
     listen: '127.0.0.1:0',
     server_keys: [options.token],
     anonymous: true,
-    zen_keys: [],
+    kilo_keys: [],
     go_keys: [],
-    upstream: { zen: 'https://opencode.ai/zen' },
+    upstream: { kilo: options.gatewayBaseUrl ?? KILO_GATEWAY_BASE_URL },
+    anonymous_key: options.anonymousKey ?? ANONYMOUS_API_KEY,
     models: { refresh_seconds: options.refreshSeconds },
     retry: { max_attempts: 2, timeout_seconds: 300 },
     proxies: ['direct'],
@@ -129,4 +162,5 @@ export async function writeAgentConfig(
   await writeFile(tmpPath, JSON.stringify(config, null, 2), 'utf8')
   await rm(paths.configPath, { force: true })
   await rename(tmpPath, paths.configPath)
+  if (platform !== 'win32') await chmod(paths.configPath, 0o600).catch(() => {})
 }

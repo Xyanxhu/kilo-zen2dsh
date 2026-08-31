@@ -1,15 +1,13 @@
 <div align="center">
 
-# opencode2dsh
+# kilo2dsh
 
-**Free OpenCode Zen models, natively inside DSH (DeepSeek Harness).**
+**Kilo Gateway's free models, natively inside DSH (DeepSeek Harness).**
 
-No API key. No registration. No extra process.
+No account or API key is required for the free lane.
 
-[![npm](https://img.shields.io/npm/v/@opencode2dsh%2Fdsh-plugin)](https://www.npmjs.com/package/@opencode2dsh/dsh-plugin)
-[![license](https://img.shields.io/npm/l/@opencode2dsh%2Fdsh-plugin)](https://github.com/FishBottle7/opencode2dsh/blob/master/LICENSE)
-[![node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen)](https://nodejs.org)
-[![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-plugin-blue)](https://github.com/FishBottle7/opencode2dsh)
+[![npm](https://img.shields.io/npm/v/@kilo2dsh%2Fdsh-plugin)](https://www.npmjs.com/package/@kilo2dsh/dsh-plugin)
+[![license](https://img.shields.io/npm/l/@kilo2dsh%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo2dsh/blob/master/LICENSE)
 
 English | [简体中文](README.zh-CN.md)
 
@@ -17,172 +15,140 @@ English | [简体中文](README.zh-CN.md)
 
 ---
 
-opencode2dsh registers a native DSH `LlmAdapter` that streams directly from
-[OpenCode Zen](https://opencode.ai/zen)'s **anonymous free lane** — the same
-models OpenCode's own CLI uses without an account, served to your DSH model
-picker as a regular provider called `opencode2dsh`.
+`kilo2dsh` registers a native DSH `LlmAdapter` backed by Kilo's
+OpenAI-compatible gateway. It discovers models from
+`https://api.kilo.ai/api/gateway/models`, exposes only records marked free,
+and streams completions to
+`https://api.kilo.ai/api/gateway/chat/completions`.
 
-Requests leave your machine looking exactly like traffic from the OpenCode
-CLI (same user agent, same correlation headers), and the model catalog stays
-fresh through a three-tier fallback chain. There is nothing to log into and
-nothing to host.
+The default request is genuinely keyless: the plugin sends an empty SDK key
+internally and suppresses the generated `Authorization` header on the wire.
+Kilo decides which free models are available and applies its per-IP quota; the
+plugin does not bypass authentication or billing.
 
 ## Highlights
 
-- **Zero credential, zero setup** — the anonymous lane needs no key; install, restart, chat
-- **Native adapter, no sidecar** — one npm package, no child process, no binary, no local port (the legacy Go sidecar is not part of the published package; see `legacy/`)
-- **CLI-identical disguise** — requests carry the OpenCode CLI user agent and its session/request/project header set, derived per conversation
-- **Live catalog with a fallback chain** — live upstream list ∩ free-by-metadata, falling back to offline cache and a verified static list
-- **Self-healing** — fast startup retries, periodic refresh, and a written health snapshot for diagnostics
-- **Proper error surfaces** — upstream failures (rate limit, auth, timeout, transport) arrive in DSH as classified finish reasons, and retries stay owned by DSH
+- Native adapter, no child process or local port in the published package.
+- Dynamic free-model discovery using Kilo's `isFree`/`is_free` flag, with
+  `kilo-auto/free` and `:free` suffix compatibility fallbacks.
+- Text-output and tool-capable models only, suitable for DSH agent turns.
+- Startup retry, periodic refresh, seven-day disk cache, and a health snapshot.
+- Optional authenticated Kilo token for compatible deployments; it is never
+  enabled by default.
 
 ## Install
 
-**From the plugin market** (recommended, once this repo is listed there):
-in DSH open **Settings → Plugin Market**, search `opencode2dsh`, one-click
-install.
-
-**From npm**:
-
 ```sh
-dsh plugin --profile web add @opencode2dsh/dsh-plugin
+dsh plugin --profile web add @kilo2dsh/dsh-plugin
 ```
 
-**From source** (build the tarball yourself):
+When using this checkout before the npm package is published, build a local
+tarball instead:
 
 ```sh
-git clone https://github.com/FishBottle7/opencode2dsh.git
-cd opencode2dsh/packages/plugin
-pnpm install && pnpm pack
-dsh plugin --profile web add ./opencode2dsh-dsh-plugin-<version>.tgz
+cd packages/plugin
+pnpm install
+pnpm pack
+dsh plugin --profile web add ./kilo2dsh-dsh-plugin-0.3.0.tgz
 ```
 
-**Verify**: restart `dsh web`, open the model picker, and pick a model from
-the **opencode2dsh** group.
-
-Requires DSH (DeepSeek Harness) with a web profile; Node.js ≥ 20 (already
-present if DSH runs); outbound HTTPS to `opencode.ai` and `models.dev`.
+Restart `dsh web`, open the model picker, and choose a model in the
+`kilo2dsh` provider group. Node.js 20 or newer is required.
 
 ## Configuration
 
-Defaults work out of the box. Override via the profile's `cordis.patch.yml`:
+The defaults are keyless and point at the public Kilo gateway:
 
 ```yaml
-- id: opencode2dsh
-  name: '@opencode2dsh/dsh-plugin'
+- id: kilo2dsh
+  name: '@kilo2dsh/dsh-plugin'
   config:
-    mode: adapter        # adapter (default) | sidecar
-    providerId: opencode2dsh
-    refreshSeconds: 300  # catalog refresh cadence
+    mode: adapter
+    providerId: kilo2dsh
+    gatewayBaseUrl: https://api.kilo.ai/api/gateway
+    refreshSeconds: 300
+    requireTools: true
 ```
+
+To use an authenticated gateway token, set `upstreamApiKeyEnv` explicitly.
+Leaving it empty is intentional; the plugin will not pick up
+`KILO_API_KEY` (or another ambient secret) by accident.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `mode` | `adapter` | `adapter`: native LlmAdapter streaming straight from Zen. `sidecar`: legacy local-agent mode, not bundled — build the agent from `legacy/agent` and pass `agentPath`. |
-| `providerId` | `opencode2dsh` | Provider name shown in DSH. |
-| `refreshSeconds` | `300` | Live catalog refresh interval. Pricing metadata refreshes every 24 h. |
-| `agentPath` | auto-resolved | Sidecar only: path to the agent binary. |
-| `agentArgs` | — | Sidecar only: extra CLI args for the agent. |
-| `restartDelayMs` / `restartMaxDelayMs` / `maxConsecutiveCrashes` | `1000` / `60000` / `5` | Sidecar only: restart backoff and circuit breaker. |
+| `mode` | `adapter` | Native adapter. `sidecar` is an optional legacy Go bridge. |
+| `providerId` | `kilo2dsh` | DSH route name. |
+| `gatewayBaseUrl` | `https://api.kilo.ai/api/gateway` | Kilo-compatible gateway base URL. |
+| `refreshSeconds` | `300` | Model catalog refresh interval. |
+| `requireTools` | `true` | Hide free models that do not advertise `tools`. |
+| `upstreamApiKeyEnv` | empty | Environment variable to opt into an explicit token. |
+| `anonymousKey` | empty | Optional token for a private compatible gateway; empty means no auth header. |
 
-## How it works
+## Wire behavior
 
-```
-DSH session
-   │  harness chunks (block-start / text-delta / usage / finish …)
-   ▼
-ZenAdapter (registered LlmAdapter)
-   │  pi-ai openai-completions stream
-   ▼
-https://opencode.ai/zen/v1        ← Authorization: Bearer public
-   with CLI-identical headers:
-     user-agent: opencode/…
-     x-opencode-client, x-opencode-session, x-session-affinity,
-     X-Session-Id, x-opencode-request, x-opencode-project
+```text
+GET  https://api.kilo.ai/api/gateway/models
+POST https://api.kilo.ai/api/gateway/chat/completions
+     (no Authorization header for the default free lane)
 ```
 
-- **Session correlation** — session/project ids are SHA-256 derived from the
-  conversation's first user turn (stable per conversation, non-reversible),
-  and each request gets a fresh random id, mirroring the CLI.
-- **Catalog fallback chain** — S1: live `GET /v1/models`; S2: models.dev
-  pricing metadata decides "free"; S3: a compile-time verified static list.
-  A disk cache (~7-day TTL) covers upstream outages.
-- **Resilience** — the adapter registers immediately at startup; if the first
-  catalog fetch races your network (VPN/TUN reconnects, DNS), the plugin
-  retries on a short cadence (~1 min) before settling into the periodic
-  refresh.
-- **Sidecar mode** (`mode: sidecar`, legacy) — spawns a local Go agent (a
-  single-tenant port of [opencode2api](https://github.com/jasonxu114514/opencode2api))
-  on `127.0.0.1:<random>`, token-authenticated, and registers a standard
-  `llm-pi-ai` route. **Not part of the published package**; build it from
-  `legacy/agent` (`go build ./cmd/agent`) and point `agentPath` at the binary.
+The adapter sends ordinary OpenAI-compatible JSON/SSE plus Kilo correlation
+headers (`X-KILOCODE-EDITORNAME`, `X-KILOCODE-TASKID`, and
+`X-KILOCODE-PROJECTID`). It does not impersonate the OpenCode CLI.
 
-## Health & troubleshooting
+The model filter is deliberately conservative:
 
-The plugin writes a health snapshot after every refresh round:
+1. `isFree` or `is_free` is authoritative when present.
+2. If the flag is absent, `kilo-auto/free`, `openrouter/free`, and IDs ending
+   in `:free`/`-free` are accepted.
+3. Image-output models and models without advertised tool support are hidden
+   by default.
 
-```
-~/.opencode2dsh/adapter-status.json
-```
+## Health and troubleshooting
 
-```json
-{
-  "status": "ready",
-  "total": 64,
-  "exposed": 9,
-  "lastError": "",
-  "writtenAt": "2026-08-29T07:01:54.915Z"
-}
+Adapter status is written to `~/.kilo2dsh/adapter-status.json`. The cache is
+stored beside it as `kilo-models.json`.
+
+Kilo's anonymous free usage is controlled by Kilo and is rate-limited by IP
+(the current documentation describes 200 requests per hour per IP). A 429 or
+an unavailable model is an upstream service decision; wait, choose another
+free model, or configure an authenticated token.
+
+For the optional legacy bridge:
+
+```sh
+cd legacy
+go build ./cmd/agent
+go test ./...
 ```
 
-| Symptom | Likely cause & fix |
-| --- | --- |
-| Only 3 models | Startup fetch raced your network; retries land within ~1 min. Check `adapter-status.json` for `lastError`. |
-| `lastError: "fetch failed"` persisting | Outbound HTTPS to `opencode.ai` blocked; check proxy/VPN rules. |
-| Rate-limit errors in chat | The anonymous lane is quota-per-IP; switch network node or wait. |
-| Connection error to `127.0.0.1:*` | A stale sidecar route shadows the adapter; plugin ≥ 0.2.1 removes it at startup. |
-| Install fails with `ERR_PNPM_IGNORED_BUILDS` | A transitive dependency of `pi-ai` (`@google/genai`, `protobufjs`) has build scripts that are not needed at runtime. Approve-or-decline them via the plugin market, or set both to `false` under `allowBuilds:` in the profile's `pnpm-workspace.yaml`. |
+It keeps a local authenticated `/v1` endpoint for DSH, but its upstream Kilo
+requests use the same keyless behavior and `/api/gateway` paths.
 
-## Security
+## Adaptation source
 
-- No secrets involved: the anonymous lane's key is the literal string `public`; nothing is stored, nothing telemetry.
-- Install paths restricted to `lib/` only; no build scripts run from dependencies.
-- All requests go directly from your machine to `opencode.ai` / `models.dev`.
+This project is adapted from the [FishBottle7/opencode2dsh](https://github.com/FishBottle7/opencode2dsh)
+DSH/OpenCode integration prototype. The original OpenCode/Zen free-tier
+integration was migrated here to Kilo Gateway's free tier; the Kilo and QwenPaw
+protocol references are listed below.
 
 ## Development
 
 ```sh
-git clone https://github.com/FishBottle7/opencode2dsh.git
-cd opencode2dsh/packages/plugin
+cd packages/plugin
 pnpm install
-pnpm typecheck && pnpm test   # 44 unit tests
-pnpm build                    # bundle to lib/
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
-The legacy Go sidecar lives in `legacy/agent` (`go test ./...`). Architecture
-notes and the porting record live in `docs/`.
+## References
 
-Releasing: `pnpm pack` in `packages/plugin` (prepack builds and syncs docs).
-
-## Acknowledgments
-
-- [**opencode2api**](https://github.com/jasonxu114514/opencode2api) by
-  [@jasonxu114514](https://github.com/jasonxu114514) — the legacy Go sidecar
-  in `legacy/agent` is a port of its anonymous-lane implementation, and the
-  catalog fallback chain and request-disguise details are derived from it.
-  This project stands on its shoulders.
-- [OpenCode](https://opencode.ai) — for running the free anonymous Zen lane.
-- [@earendil-works/pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai) — the wire layer used by adapter mode.
-- [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh) and the
-  [dsh-market](https://github.com/dsh-market/dsh-market) community.
-
-## Friends
-
-<div align="center">
-
-**[LinuxDo](https://linux.do)** — 新的理想型社区 / a new ideal community
-
-</div>
+- [Kilo Gateway authentication](https://kilo.ai/docs/gateway/authentication)
+- [Using Kilo for Free](https://kilo.ai/docs/getting-started/using-kilo-for-free)
+- [Kilo Gateway API reference](https://github.com/Kilo-Org/kilocode/blob/main/packages/kilo-docs/pages/gateway/api-reference.md)
+- [QwenPaw Kilo provider](https://github.com/agentscope-ai/QwenPaw/blob/main/src/qwenpaw/providers/openai_provider.py)
+- [@earendil-works/pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai)
 
 ## License
 

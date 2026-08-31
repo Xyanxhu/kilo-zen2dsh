@@ -5,122 +5,117 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestCatalogPendingFallsBackToStatic(t *testing.T) {
+func boolPtr(value bool) *bool { return &value }
+
+func TestCatalogPendingFallsBackToKiloStatic(t *testing.T) {
 	original := staticFreeModels
 	defer func() { staticFreeModels = original }()
-	staticFreeModels = []string{"static-one", "static-two"}
+	staticFreeModels = []string{"kilo-auto/free", "stepfun/test:free"}
 
-	catalog := NewModelCatalog(nil)
-	if got := catalog.List(); !reflect.DeepEqual(got, []string{"static-one", "static-two"}) {
-		t.Fatalf("pending catalog must expose the S3 list, got %v", got)
+	modelCatalog := NewModelCatalog(nil)
+	if got := modelCatalog.List(); !reflect.DeepEqual(got, staticFreeModels) {
+		t.Fatalf("pending catalog must expose Kilo static list, got %v", got)
 	}
-	if !catalog.Supported("static-one") || !catalog.Supported("anything") {
-		t.Fatalf("pending catalog must support everything (upstream catalogPending branch)")
+	if !modelCatalog.Supported("kilo-auto/free") || modelCatalog.Supported("anything-paid") {
+		t.Fatalf("pending catalog must allow only free fallback IDs")
 	}
-	if _, err := catalog.Route("static-one", true); err != nil {
-		t.Fatalf("static model must route while pending: %v", err)
+	if _, err := modelCatalog.Route("kilo-auto/free", true); err != nil {
+		t.Fatalf("static free model must route while pending: %v", err)
 	}
 }
 
-func TestCatalogDynamicListFiltersStatic(t *testing.T) {
-	original := staticFreeModels
-	defer func() { staticFreeModels = original }()
-	staticFreeModels = []string{"stale-model"}
-
-	catalog := NewModelCatalog(nil)
-	catalog.Replace([]string{"fresh-a", "fresh-b"})
-	if got := catalog.List(); reflect.DeepEqual(got, []string{"stale-model"}) || len(got) != 2 {
-		t.Fatalf("dynamic catalog must be authoritative once refreshed, got %v", got)
+func TestCatalogDynamicListFiltersKiloCapabilities(t *testing.T) {
+	modelCatalog := NewModelCatalog(nil)
+	modelCatalog.ReplaceRecords([]KiloModel{
+		{ID: "free-a", IsFree: boolPtr(true), SupportedParameters: []string{"tools"}},
+		{ID: "suffix:free", SupportedParameters: []string{"tools"}},
+		{ID: "paid", IsFree: boolPtr(false), SupportedParameters: []string{"tools"}},
+		{ID: "no-tools", IsFree: boolPtr(true), SupportedParameters: []string{"reasoning"}},
+		{ID: "image-free", IsFree: boolPtr(true), SupportedParameters: []string{"tools"}, Architecture: struct {
+			OutputModalities []string `json:"output_modalities"`
+		}{OutputModalities: []string{"image"}}},
+	})
+	if got := modelCatalog.List(); !reflect.DeepEqual(got, []string{"free-a", "suffix:free"}) {
+		t.Fatalf("dynamic catalog must expose only free text/tool models, got %v", got)
 	}
-	if catalog.Supported("stale-model") {
-		t.Fatalf("delisted model must lose support after refresh")
+	if modelCatalog.Supported("paid") || modelCatalog.Supported("no-tools") || modelCatalog.Supported("image-free") {
+		t.Fatalf("paid/unsupported records must not route")
 	}
-	snap := catalog.Snapshot()
-	if snap.Zen != 2 || snap.Total != 2 || snap.Exposed != 2 || snap.UpdatedAt.IsZero() {
+	snap := modelCatalog.Snapshot()
+	if snap.Kilo != 5 || snap.Total != 5 || snap.Exposed != 2 || snap.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected snapshot: %+v", snap)
 	}
-}
-
-func TestCatalogDecisionMergeWithMetadata(t *testing.T) {
-	store := &ModelMetadataStore{
-		models: map[string]ModelPrice{
-			"costless-one":  {ID: "costless-one", Input: zeroCost(), Output: zeroCost()},
-			"paid-one":  {ID: "paid-one", Input: paidCost(), Output: paidCost()},
-			"legacy-zero":  {ID: "legacy-zero", Input: zeroCost(), Output: zeroCost(), Deprecated: true},
-			"third-party": {ID: "third-party", Input: paidCost(), Output: paidCost()},
-		},
-		updatedAt: testTime(),
-	}
-	catalog := NewModelCatalog(store)
-
-	if d := catalog.AnonymousDecision("costless-one"); !d.Allowed || d.Source != "metadata_free" {
-		t.Fatalf("S1∩S2: metadata free must allow, got %+v", d)
-	}
-	if d := catalog.AnonymousDecision("paid-one"); d.Allowed {
-		t.Fatalf("S1∩S2: metadata paid must deny, got %+v", d)
-	}
-	if d := catalog.AnonymousDecision("legacy-zero"); d.Allowed {
-		t.Fatalf("deprecated must deny even with free in the name, got %+v", d)
-	}
-
-	// S2 not ready => name fallback (models.go:257 upstream behavior).
-	pending := NewModelCatalog(&ModelMetadataStore{models: map[string]ModelPrice{}})
-	if d := pending.AnonymousDecision("xx-free-xx"); !d.Allowed || d.Source != "name_free" {
-		t.Fatalf("pending metadata must fall back to name, got %+v", d)
+	if route, err := modelCatalog.Route("free-a", true); err != nil || route.Tier != TierKilo || !route.Anonymous {
+		t.Fatalf("free record should route through Kilo: %+v %v", route, err)
 	}
 }
 
-func TestCatalogStaticOverridesOnlyUnknownMetadata(t *testing.T) {
-	original := staticFreeModels
-	defer func() { staticFreeModels = original }()
-	staticFreeModels = []string{"verified-one", "verified-paid"}
-
-	// metadata missing the model entirely -> static vouches.
-	missing := NewModelCatalog(&ModelMetadataStore{models: map[string]ModelPrice{"other": {ID: "other"}}, updatedAt: testTime()})
-	if d := missing.AnonymousDecision("verified-one"); !d.Allowed || d.Source != "static_verified" {
-		t.Fatalf("static entry must be allowed when metadata does not know it, got %+v", d)
+func TestKiloFreeFlagPrecedenceAndPricingFallback(t *testing.T) {
+	modelCatalog := NewModelCatalog(nil)
+	modelCatalog.ReplaceRecords([]KiloModel{
+		{ID: "camel-false:free", IsFree: boolPtr(false), IsFreeSnake: boolPtr(true), SupportedParameters: []string{"tools"}},
+		{ID: "snake-true", IsFreeSnake: boolPtr(true), SupportedParameters: []string{"tools"}},
+		{ID: "kilo-auto/custom", Pricing: map[string]interface{}{"input": "0", "output": "0"}, SupportedParameters: []string{"tools"}},
+		{ID: "deprecated:free", IsFree: boolPtr(true), Deprecated: true, SupportedParameters: []string{"tools"}},
+	})
+	if modelCatalog.Supported("camel-false:free") {
+		t.Fatal("camelCase isFree=false must override snake_case and suffix")
 	}
-
-	// metadata knows it as paid -> honest denial wins (R3).
-	store := &ModelMetadataStore{
-		models: map[string]ModelPrice{"verified-paid": {ID: "verified-paid", Input: paidCost(), Output: paidCost()}},
-		updatedAt: testTime(),
+	if !modelCatalog.Supported("snake-true") || !modelCatalog.Supported("kilo-auto/custom") {
+		t.Fatal("snake_case free flag and router zero pricing should be accepted")
 	}
-	known := NewModelCatalog(store)
-	if d := known.AnonymousDecision("verified-paid"); d.Allowed {
-		t.Fatalf("metadata paid must not be overridden by the static list, got %+v", d)
-	}
-
-	// pending metadata -> static vouches (design.md 4.2 fallback chain).
-	pending := NewModelCatalog(&ModelMetadataStore{models: map[string]ModelPrice{}})
-	if d := pending.AnonymousDecision("verified-one"); !d.Allowed || d.Source != "static_verified" {
-		t.Fatalf("static must vouch while metadata is pending, got %+v", d)
+	if modelCatalog.Supported("deprecated:free") {
+		t.Fatal("deprecated records must not be exposed")
 	}
 }
 
-func TestFetchModelsParsesList(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"data":[{"id":"a"},{"id":"b"},{"id":""}]}`))
+func TestFetchKiloModelsIsKeylessByDefault(t *testing.T) {
+	var seenPath string
+	var seenAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"kilo-auto/free","isFree":true,"supported_parameters":["tools"]},{"id":"paid","isFree":false}]}`))
 	}))
 	defer server.Close()
-	models, status, err := FetchModels(context.Background(), server.Client(), server.URL, "public")
-	if err != nil || status != 200 {
-		t.Fatalf("FetchModels failed: %v %d", err, status)
+	models, status, err := FetchKiloModels(context.Background(), server.Client(), server.URL+"/api/gateway", "")
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("FetchKiloModels failed: %v %d", err, status)
 	}
-	if !reflect.DeepEqual(models, []string{"a", "b"}) {
-		t.Fatalf("unexpected models: %v", models)
+	if seenPath != "/api/gateway/models" || seenAuth != "" {
+		t.Fatalf("keyless Kilo discovery must use /models without auth: path=%s auth=%q", seenPath, seenAuth)
+	}
+	if len(models) != 2 || models[0].ID != "kilo-auto/free" {
+		t.Fatalf("unexpected Kilo records: %+v", models)
+	}
+}
+
+func TestFetchKiloModelsUsesExplicitTokenOnlyWhenProvided(t *testing.T) {
+	var seenAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"data":[{"id":"kilo-auto/free"}]}`))
+	}))
+	defer server.Close()
+	if _, _, err := FetchKiloModels(context.Background(), server.Client(), server.URL+"/models", "account-token"); err != nil {
+		t.Fatal(err)
+	}
+	if seenAuth != "Bearer account-token" {
+		t.Fatalf("explicit token was not forwarded: %q", seenAuth)
 	}
 }
 
 func TestFetchModelsRejectsEmpty(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"data":[]}`))
+		_, _ = w.Write([]byte(`{"data":[]}`))
 	}))
 	defer server.Close()
-	if _, _, err := FetchModels(context.Background(), server.Client(), server.URL, "public"); err == nil {
-		t.Fatalf("empty model list must error")
+	if _, _, err := FetchModels(context.Background(), server.Client(), server.URL, ""); err == nil || !strings.Contains(err.Error(), "empty list") {
+		t.Fatalf("empty Kilo model list must error, got %v", err)
 	}
 }

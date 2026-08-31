@@ -30,8 +30,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if !cfg.Anonymous {
 		t.Fatalf("anonymous must default to true")
 	}
-	if cfg.Upstream.Zen != "https://opencode.ai/zen" {
-		t.Fatalf("unexpected default zen upstream: %q", cfg.Upstream.Zen)
+	if cfg.Upstream.Kilo != "https://api.kilo.ai/api/gateway" {
+		t.Fatalf("unexpected default Kilo upstream: %q", cfg.Upstream.Kilo)
+	}
+	if cfg.AnonymousKey != "" {
+		t.Fatalf("free lane must default to an empty upstream key: %q", cfg.AnonymousKey)
 	}
 	if cfg.Retry.TimeoutSeconds != 300 || cfg.Models.RefreshSeconds != 300 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
@@ -44,7 +47,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 func TestLoadConfigValidVariants(t *testing.T) {
 	cases := []string{
 		`{"listen":"localhost:8317","server_keys":["a"],"anonymous":true,"proxies":["direct"]}`,
-		`{"listen":"[::1]:0","server_keys":["a","b"],"upstream":{"zen":"http://example.internal/zen"},"retry":{"max_attempts":2,"timeout_seconds":60}}`,
+		`{"listen":"[::1]:0","server_keys":["a","b"],"upstream":{"kilo":"http://example.internal/api/gateway"},"retry":{"max_attempts":2,"timeout_seconds":60}}`,
 		`{"server_keys":["a"],"logging":{"level":"debug"},"performance":{"max_idle_conns":10,"max_idle_conns_per_host":2,"idle_conn_timeout_seconds":5,"connect_timeout_seconds":1,"failure_cooldown_seconds":1}}`,
 	}
 	for i, raw := range cases {
@@ -64,7 +67,7 @@ func TestLoadConfigInvalidVariants(t *testing.T) {
 		{`{"server_keys":["a"],"anonymous":false}`, "anonymous"},
 		{`{}`, "server_keys"},
 		{`{"server_keys":[]}`, "server_keys"},
-		{`{"server_keys":["a"],"upstream":{"zen":"not-a-url"}}`, "http or https"},
+		{`{"server_keys":["a"],"upstream":{"kilo":"not-a-url"}}`, "http or https"},
 		{`{"server_keys":["a"],"retry":{"max_attempts":0}}`, "max_attempts"},
 		{`{"server_keys":["a"],"logging":{"level":"trace"}}`, "logging.level"},
 		{`{"server_keys":["a"],"unknown_field":1}`, "unknown field"},
@@ -82,11 +85,11 @@ func TestLoadConfigInvalidVariants(t *testing.T) {
 }
 
 func TestStripJSONCommentsPreservesURLs(t *testing.T) {
-	out, err := stripJSONComments([]byte(`{"upstream":{"zen":"https://opencode.ai/zen"}} /* block */`))
+	out, err := stripJSONComments([]byte(`{"upstream":{"kilo":"https://api.kilo.ai/api/gateway"}} /* block */`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "https://opencode.ai/zen") {
+	if !strings.Contains(string(out), "https://api.kilo.ai/api/gateway") {
 		t.Fatalf("comment stripper damaged URL content: %s", out)
 	}
 	if _, err := stripJSONComments([]byte(`{"a": /* unterminated`)); err == nil {
@@ -113,5 +116,26 @@ func TestSaveConfigAtomicRoundTrip(t *testing.T) {
 	}
 	if got := reloaded.RuntimeProxies(); len(got) != 1 || got[0] != "direct" {
 		t.Fatalf("saved config must not persist effective proxies: %v", got)
+	}
+}
+
+func TestSaveConfigAtomicDoesNotReemitLegacyZenFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, err := LoadConfig(writeTemp(t, `{"server_keys":["secret"],"zen_keys":["old"],"upstream":{"zen":"https://old.example/gateway"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfigAtomic(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "zen_keys") || strings.Contains(string(raw), `"zen"`) {
+		t.Fatalf("saved config must use Kilo fields only: %s", raw)
+	}
+	if !strings.Contains(string(raw), "api.kilo.ai") && !strings.Contains(string(raw), "old.example") {
+		t.Fatalf("saved config lost upstream URL: %s", raw)
 	}
 }

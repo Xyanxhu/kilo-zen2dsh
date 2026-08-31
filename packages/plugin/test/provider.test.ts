@@ -40,11 +40,11 @@ test('registerProvider stores token and writes the llm-pi-ai route', async () =>
   }
   await registerProvider(
     seams,
-    { providerId: 'opencode2dsh', apiKeyEnv: 'OPENCODE2DSH_TOKEN', port: 4567 },
+    { providerId: 'kilo2dsh', apiKeyEnv: 'KILO2DSH_TOKEN', port: 4567 },
     'tok',
     [{ id: 'm1', name: 'M1' }],
   )
-  assert.deepEqual(calls.credentials, [['OPENCODE2DSH_TOKEN', 'tok']])
+  assert.deepEqual(calls.credentials, [['KILO2DSH_TOKEN', 'tok']])
   assert.equal(calls.ops.length, 1)
   const first = calls.ops.at(0)
   assert.ok(first, 'expected one mutate call')
@@ -53,10 +53,10 @@ test('registerProvider stores token and writes the llm-pi-ai route', async () =>
   assert.ok(setOp, 'expected one set op')
   assert.equal(op.ns, 'llm-pi-ai')
   assert.equal(setOp.op, 'set')
-  assert.deepEqual(setOp.path, ['providers', 'opencode2dsh'])
+  assert.deepEqual(setOp.path, ['providers', 'kilo2dsh'])
   assert.equal(setOp.value.baseURL, providerBaseURL(4567))
   assert.equal(setOp.value.baseURL, 'http://127.0.0.1:4567/v1')
-  assert.equal(setOp.value.apiKeyEnv, 'OPENCODE2DSH_TOKEN')
+  assert.equal(setOp.value.apiKeyEnv, 'KILO2DSH_TOKEN')
   assert.equal(setOp.value.api, 'openai-completions')
   assert.deepEqual(setOp.value.models, [{ id: 'm1', name: 'M1' }])
 })
@@ -74,18 +74,18 @@ test('removeProviderRoute unsets the sidecar leftover only when present', async 
     logger: { info: () => {}, warn: () => {} },
   })
   // no namespace at all
-  assert.equal(await removeProviderRoute({ settings: makeSeams(undefined).settings }, 'opencode2dsh'), false)
+  assert.equal(await removeProviderRoute({ settings: makeSeams(undefined).settings }, 'kilo2dsh'), false)
   // namespace but no providers section
-  assert.equal(await removeProviderRoute({ settings: makeSeams(undefined).settings }, 'opencode2dsh'), false)
+  assert.equal(await removeProviderRoute({ settings: makeSeams(undefined).settings }, 'kilo2dsh'), false)
   // route present -> unset
-  const seams = makeSeams({ opencode2dsh: { baseURL: 'http://127.0.0.1:6865/v1' }, other: {} })
-  assert.equal(await removeProviderRoute({ settings: seams.settings }, 'opencode2dsh'), true)
+  const seams = makeSeams({ kilo2dsh: { baseURL: 'http://127.0.0.1:6865/v1' }, other: {} })
+  assert.equal(await removeProviderRoute({ settings: seams.settings }, 'kilo2dsh'), true)
   assert.equal(mutations.length, 1)
   const mutation = mutations[0]
   assert.ok(mutation)
   assert.equal(mutation.ns, 'llm-pi-ai')
   assert.equal(mutation.ops[0]?.op, 'unset')
-  assert.deepEqual(mutation.ops[0]?.path, ['providers', 'opencode2dsh'])
+  assert.deepEqual(mutation.ops[0]?.path, ['providers', 'kilo2dsh'])
   // other providers untouched: unset is path-scoped, verified by the op above
 })
 

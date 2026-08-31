@@ -1,5 +1,10 @@
 package catalog
 
+// This file keeps the reference project's metadata-store API source
+// compatible for downstream users. Kilo normally publishes all information we
+// need in /models, so the sidecar does not start this store; when constructed
+// explicitly it reads the same Kilo endpoint and never contacts models.dev.
+
 import (
 	"context"
 	"encoding/json"
@@ -12,17 +17,26 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"opencode2dsh/agent/internal/ids"
+	"kilo2dsh/agent/internal/ids"
 )
 
 const (
-	modelsDevDefaultURL = "https://models.dev/api.json"
-	modelsDevRefresh    = 24 * time.Hour
-	modelsDevTimeout    = 30 * time.Second
+	kiloModelsDefaultURL = "https://api.kilo.ai/api/gateway/models"
+	kiloMetadataRefresh  = 24 * time.Hour
+	kiloMetadataTimeout  = 30 * time.Second
+)
+
+// Deprecated aliases avoid breaking code that used these package constants in
+// tests; their values now point at Kilo, not the old models.dev service.
+const (
+	modelsDevDefaultURL = kiloModelsDefaultURL
+	modelsDevRefresh    = kiloMetadataRefresh
+	modelsDevTimeout    = kiloMetadataTimeout
 )
 
 type ModelPrice struct {
@@ -30,6 +44,7 @@ type ModelPrice struct {
 	Input      *float64 `json:"input_cost,omitempty"`
 	Output     *float64 `json:"output_cost,omitempty"`
 	Deprecated bool     `json:"deprecated"`
+	Free       *bool    `json:"free,omitempty"`
 }
 
 type AnonymousDecision struct {
@@ -56,9 +71,6 @@ type modelMetadataCache struct {
 	Models    map[string]ModelPrice `json:"models"`
 }
 
-// ModelMetadataStore tracks models.dev pricing data and decides whether a
-// model id is free. Upstream it also rode proxy transports via a client
-// provider; opencode2dsh is direct-only, so the store uses its own client.
 type ModelMetadataStore struct {
 	mu        sync.RWMutex
 	models    map[string]ModelPrice
@@ -73,14 +85,14 @@ type ModelMetadataStore struct {
 func NewModelMetadataStore(configPath string, logger *slog.Logger) *ModelMetadataStore {
 	cachePath := ""
 	if configPath != "" {
-		cachePath = configPath + ".models.dev.json"
+		cachePath = configPath + ".kilo-models.json"
 	}
 	store := &ModelMetadataStore{
-		models: make(map[string]ModelPrice), cachePath: cachePath, endpoint: modelsDevDefaultURL,
-		client: &http.Client{Timeout: modelsDevTimeout}, logger: logger,
+		models: make(map[string]ModelPrice), cachePath: cachePath, endpoint: kiloModelsDefaultURL,
+		client: &http.Client{Timeout: kiloMetadataTimeout}, logger: logger,
 	}
 	if err := store.loadCache(); err != nil && !errors.Is(err, os.ErrNotExist) {
-		store.lastError = "load metadata cache: " + err.Error()
+		store.lastError = "load Kilo model cache: " + err.Error()
 	}
 	return store
 }
@@ -88,7 +100,7 @@ func NewModelMetadataStore(configPath string, logger *slog.Logger) *ModelMetadat
 func (store *ModelMetadataStore) Start(ctx context.Context) {
 	go func() {
 		store.refreshAndLog(ctx)
-		ticker := time.NewTicker(modelsDevRefresh)
+		ticker := time.NewTicker(kiloMetadataRefresh)
 		defer ticker.Stop()
 		for {
 			select {
@@ -104,12 +116,12 @@ func (store *ModelMetadataStore) Start(ctx context.Context) {
 func (store *ModelMetadataStore) refreshAndLog(ctx context.Context) {
 	if err := store.Refresh(ctx); err != nil {
 		if store.logger != nil {
-			store.logger.Warn("models.dev metadata refresh failed", "component", "models", "event", "metadata_refresh_failed", "error", err)
+			store.logger.Warn("Kilo model catalog refresh failed", "component", "models", "event", "kilo_refresh_failed", "error", err)
 		}
 		return
 	}
 	if store.logger != nil {
-		store.logger.Info("models.dev metadata refreshed", "component", "models", "event", "metadata_refreshed", "models", store.snapshot().Models)
+		store.logger.Info("Kilo model catalog refreshed", "component", "models", "event", "kilo_refreshed", "models", store.snapshot().Models)
 	}
 }
 
@@ -118,7 +130,7 @@ func (store *ModelMetadataStore) Refresh(ctx context.Context) error {
 	if err != nil {
 		return store.recordError(err)
 	}
-	models, err := decodeModelsDev(data)
+	models, err := decodeKiloPrices(data)
 	if err != nil {
 		return store.recordError(err)
 	}
@@ -136,7 +148,7 @@ func (store *ModelMetadataStore) Refresh(ctx context.Context) error {
 }
 
 func (store *ModelMetadataStore) fetch(ctx context.Context) ([]byte, error) {
-	refreshCtx, cancel := context.WithTimeout(ctx, modelsDevTimeout)
+	refreshCtx, cancel := context.WithTimeout(ctx, kiloMetadataTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(refreshCtx, http.MethodGet, store.endpoint, nil)
 	if err != nil {
@@ -150,7 +162,7 @@ func (store *ModelMetadataStore) fetch(ctx context.Context) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("models.dev returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("Kilo models endpoint returned HTTP %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 }
@@ -167,45 +179,30 @@ func (store *ModelMetadataStore) Decide(model string) AnonymousDecision {
 	price, exists := store.models[model]
 	ready := !store.updatedAt.IsZero() && len(store.models) > 0
 	store.mu.RUnlock()
-	nameFree := isFreeModel(model)
-	fallback := func(source string) AnonymousDecision {
-		if nameFree {
-			return AnonymousDecision{Allowed: true, Source: "name_free", Known: false}
-		}
-		return AnonymousDecision{Allowed: false, Source: source, Known: false}
-	}
 	if !ready {
-		return fallback("metadata_pending")
+		if isFreeModel(model) {
+			return AnonymousDecision{Allowed: true, Source: "name_free_pending", Known: false}
+		}
+		return AnonymousDecision{Allowed: false, Source: "catalog_pending", Known: false}
 	}
 	if !exists {
-		return fallback("metadata_model_missing")
+		return AnonymousDecision{Allowed: false, Source: "catalog_missing", Known: false}
 	}
-	decision := AnonymousDecision{
-		Known: true, Deprecated: price.Deprecated, InputCost: price.Input, OutputCost: price.Output,
-	}
-	metadataFree := !price.Deprecated && price.Input != nil && price.Output != nil && *price.Input == 0 && *price.Output == 0
-	if nameFree || metadataFree {
-		decision.Allowed = true
-		switch {
-		case nameFree && metadataFree:
-			decision.Source = "name_and_metadata_free"
-		case nameFree:
-			decision.Source = "name_free"
-		default:
-			decision.Source = "metadata_free"
-		}
-		return decision
-	}
+	decision := AnonymousDecision{Known: true, Deprecated: price.Deprecated, InputCost: price.Input, OutputCost: price.Output}
 	if price.Deprecated {
-		decision.Source = "metadata_deprecated"
+		decision.Source = "catalog_deprecated"
 		return decision
 	}
-	if price.Input == nil || price.Output == nil {
-		decision.Known = false
-		decision.Source = "metadata_cost_unknown"
+	if price.Free != nil {
+		decision.Allowed = *price.Free
+		decision.Source = "catalog_free"
 		return decision
 	}
-	decision.Source = "metadata_paid"
+	if price.Input != nil && price.Output != nil && *price.Input == 0 && *price.Output == 0 {
+		decision.Allowed, decision.Source = true, "catalog_free"
+		return decision
+	}
+	decision.Source = "catalog_paid"
 	return decision
 }
 
@@ -222,9 +219,9 @@ func (store *ModelMetadataStore) snapshot() metadataSnapshot {
 	snapshot := metadataSnapshot{Ready: !store.updatedAt.IsZero() && len(store.models) > 0, Models: len(store.models), LastError: store.lastError, CachePath: store.cachePath}
 	if !store.updatedAt.IsZero() {
 		updated := store.updatedAt.UTC()
-		next := updated.Add(modelsDevRefresh)
+		next := updated.Add(kiloMetadataRefresh)
 		snapshot.UpdatedAt, snapshot.NextRefresh = &updated, &next
-		snapshot.Stale = time.Since(updated) > modelsDevRefresh
+		snapshot.Stale = time.Since(updated) > kiloMetadataRefresh
 	}
 	return snapshot
 }
@@ -244,41 +241,45 @@ func (store *ModelMetadataStore) loadCache() error {
 		return err
 	}
 	if cache.UpdatedAt.IsZero() || len(cache.Models) == 0 {
-		return errors.New("metadata cache is empty or missing updated_at")
+		return errors.New("Kilo model cache is empty or missing updated_at")
 	}
 	store.models, store.updatedAt = cache.Models, cache.UpdatedAt.UTC()
 	return nil
 }
 
-func decodeModelsDev(data []byte) (map[string]ModelPrice, error) {
+func decodeKiloPrices(data []byte) (map[string]ModelPrice, error) {
+	var payload KiloModelResponse
+	if err := json.Unmarshal(data, &payload); err == nil && len(payload.Data) > 0 {
+		result := make(map[string]ModelPrice, len(payload.Data))
+		for _, model := range payload.Data {
+			model.ID = strings.TrimSpace(model.ID)
+			if model.ID == "" {
+				continue
+			}
+			input := numberFromMap(model.Pricing, "prompt", "input")
+			output := numberFromMap(model.Pricing, "completion", "output")
+			free := isFreeKiloModel(model)
+			result[model.ID] = ModelPrice{ID: model.ID, Input: input, Output: output, Free: &free}
+		}
+		if len(result) > 0 {
+			return result, nil
+		}
+	}
+	// Accept an old provider-map fixture for source compatibility, but never
+	// fetch that service in production.
 	var providers map[string]json.RawMessage
 	if err := json.Unmarshal(data, &providers); err != nil {
-		return nil, fmt.Errorf("decode models.dev: %w", err)
+		return nil, fmt.Errorf("decode Kilo models: %w", err)
 	}
 	keys := make([]string, 0, len(providers))
 	for key := range providers {
 		keys = append(keys, key)
 	}
-	sort.SliceStable(keys, func(i, j int) bool {
-		left, right := metadataProviderRank(keys[i]), metadataProviderRank(keys[j])
-		if left == right {
-			return keys[i] < keys[j]
-		}
-		return left < right
-	})
+	sort.Strings(keys)
 	for _, key := range keys {
-		if metadataProviderRank(key) > 1 {
-			continue
-		}
 		var provider map[string]any
 		if json.Unmarshal(providers[key], &provider) != nil {
 			continue
-		}
-		if metadataProviderRank(key) == 1 {
-			identity := strings.ToLower(ids.FirstString(ids.StringAt(provider, "id"), ids.StringAt(provider, "name")))
-			if !strings.Contains(identity, "opencode") {
-				continue
-			}
 		}
 		models := ids.MapAt(provider, "models")
 		if len(models) == 0 {
@@ -289,49 +290,54 @@ func decodeModelsDev(data []byte) (map[string]ModelPrice, error) {
 			model, _ := raw.(map[string]any)
 			modelID := ids.FirstString(ids.StringAt(model, "id"), id)
 			cost := ids.MapAt(model, "cost")
-			result[modelID] = ModelPrice{
-				ID: modelID, Input: numberPointer(cost, "input"), Output: numberPointer(cost, "output"), Deprecated: metadataDeprecated(model),
-			}
+			result[modelID] = ModelPrice{ID: modelID, Input: numberPointer(cost, "input"), Output: numberPointer(cost, "output"), Deprecated: metadataDeprecated(model)}
 		}
 		if len(result) > 0 {
 			return result, nil
 		}
 	}
-	return nil, errors.New("models.dev contains no OpenCode model metadata")
+	return nil, errors.New("Kilo models response contains no model metadata")
 }
 
-func metadataProviderRank(key string) int {
-	lower := strings.ToLower(key)
-	if lower == "opencode" || lower == "opencode-zen" || lower == "opencode_zen" {
-		return 0
+// decodeModelsDev remains an old symbol used by early plugin ports.
+func decodeModelsDev(data []byte) (map[string]ModelPrice, error) { return decodeKiloPrices(data) }
+
+func numberFromMap(values map[string]interface{}, keys ...string) *float64 {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok || value == nil {
+			continue
+		}
+		var number float64
+		switch typed := value.(type) {
+		case float64:
+			number = typed
+		case float32:
+			number = float64(typed)
+		case int:
+			number = float64(typed)
+		case string:
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+			if err != nil {
+				continue
+			}
+			number = parsed
+		default:
+			continue
+		}
+		return &number
 	}
-	if strings.Contains(lower, "opencode") {
-		return 1
-	}
-	return 2
+	return nil
 }
 
-func numberPointer(object map[string]any, key string) *float64 {
-	value, exists := object[key]
-	if !exists || value == nil {
-		return nil
-	}
-	number, ok := value.(float64)
-	if !ok {
-		return nil
-	}
-	return &number
-}
+func numberPointer(object map[string]any, key string) *float64 { return numberFromMap(object, key) }
 
 func metadataDeprecated(model map[string]any) bool {
 	if ids.BoolAt(model, "deprecated") {
 		return true
 	}
 	status := strings.ToLower(ids.FirstString(ids.StringAt(model, "status"), ids.StringAt(model, "lifecycle")))
-	if status == "deprecated" || status == "retired" || status == "disabled" {
-		return true
-	}
-	return model["deprecated_at"] != nil || model["retirement_date"] != nil
+	return status == "deprecated" || status == "retired" || status == "disabled" || model["deprecated_at"] != nil || model["retirement_date"] != nil
 }
 
 func saveMetadataCache(path string, cache modelMetadataCache) error {
@@ -341,7 +347,10 @@ func saveMetadataCache(path string, cache modelMetadataCache) error {
 	}
 	data = append(data, '\n')
 	dir := filepath.Dir(path)
-	temp, err := os.CreateTemp(dir, ".models-dev-*.tmp")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(dir, ".kilo-models-*.tmp")
 	if err != nil {
 		return err
 	}
