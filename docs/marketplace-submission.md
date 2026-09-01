@@ -32,7 +32,7 @@ Notes on the wording (their review rules):
 - [ ] `dsh.bundle` manifest reachable **from the URL the entry points at**:
       the check reads the `package.json` at the entry URL. The repo ROOT now
       declares `dsh.bundle.patch: ./cordis.patch.yml` plus an npm dependency
-      on `@huanx/dsh-plugin` (current `master`), so the entry points at
+      on `@huanx/kilo-zen2dsh` (current `master`), so the entry points at
       the repository root with no `#` suffix and the npm mapping links.
       History: the first submission pointed at the root but was bounced
       ("root package.json declares no dsh.bundle"), refiled at the
@@ -79,7 +79,7 @@ independently and has its own disk cache/health snapshot; Zen can be disabled
 with `zenEnabled: false`.
 
 **Install source** — published to npm as
-[`@huanx/dsh-plugin`](https://www.npmjs.com/package/@huanx/dsh-plugin);
+[`@huanx/kilo-zen2dsh`](https://www.npmjs.com/package/@huanx/kilo-zen2dsh);
 its `repository` field points back at the listed repo.
 
 **Manifest** — `packages/plugin/package.json` declares

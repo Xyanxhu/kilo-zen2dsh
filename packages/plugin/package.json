@@ -1,5 +1,5 @@
 {
-  "name": "@huanx/dsh-plugin",
+  "name": "@huanx/kilo-zen2dsh",
   "version": "0.3.0",
   "description": "Free Kilo Gateway and OpenCode Zen models for DeepSeek Harness (DSH) via native dsh-llm adapters.",
   "type": "module",
