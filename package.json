@@ -8,6 +8,6 @@
     }
   },
   "dependencies": {
-    "@kilo-zen2dsh/dsh-plugin": "^0.3.0"
+    "@huanx/dsh-plugin": "^0.3.0"
   }
 }

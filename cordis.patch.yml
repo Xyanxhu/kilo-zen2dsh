@@ -1,11 +1,11 @@
 # kilo-zen2dsh DSH plugin — bundle patch: insert the plugin row (deployment-global).
 #
-# The plugin itself is distributed as the npm package @kilo-zen2dsh/dsh-plugin
+# The plugin itself is distributed as the npm package @huanx/dsh-plugin
 # (declared in dependencies); this patch only inserts its loader row.
 # Defaults need no edits: native adapters register Kilo (keyless) and OpenCode
 # Zen (public compatibility lane) with no extra process. Override any option via
 # the config object (src/config.ts); set zenEnabled: false for Kilo only.
 - insert:
     - id: kilo2dsh
-      name: '@kilo-zen2dsh/dsh-plugin'
+      name: '@huanx/dsh-plugin'
       config: {}

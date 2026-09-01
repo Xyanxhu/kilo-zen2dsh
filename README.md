@@ -7,8 +7,8 @@
 Kilo's free lane is keyless. OpenCode Zen is an independent, compatibility
 lane whose anonymous availability is controlled by the Zen gateway.
 
-[![npm](https://img.shields.io/npm/v/@kilo-zen2dsh%2Fdsh-plugin)](https://www.npmjs.com/package/@kilo-zen2dsh/dsh-plugin)
-[![license](https://img.shields.io/npm/l/@kilo-zen2dsh%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo-zen2dsh/blob/master/LICENSE)
+[![npm](https://img.shields.io/npm/v/@huanx%2Fdsh-plugin)](https://www.npmjs.com/package/@huanx/dsh-plugin)
+[![license](https://img.shields.io/npm/l/@huanx%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo-zen2dsh/blob/master/LICENSE)
 
 English | [简体中文](README.zh-CN.md)
 
@@ -46,7 +46,7 @@ account. Neither provider is an authentication or billing bypass.
 ## Install
 
 ```sh
-dsh plugin --profile web add @kilo-zen2dsh/dsh-plugin
+dsh plugin --profile web add @huanx/dsh-plugin
 ```
 
 When using this checkout before the npm package is published, build a local
@@ -56,7 +56,7 @@ tarball instead:
 cd packages/plugin
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./kilo-zen2dsh-dsh-plugin-0.3.0.tgz
+dsh plugin --profile web add ./huanx-dsh-plugin-0.3.0.tgz
 ```
 
 Restart `dsh web`, open the model picker, and choose a model in either the
@@ -69,7 +69,7 @@ The defaults are keyless and point at the public Kilo gateway:
 
 ```yaml
 - id: kilo2dsh
-  name: '@kilo-zen2dsh/dsh-plugin'
+  name: '@huanx/dsh-plugin'
   config:
     mode: adapter
     providerId: kilo2dsh

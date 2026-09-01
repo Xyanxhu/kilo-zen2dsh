@@ -7,8 +7,8 @@
 Kilo 免费层无需 Key；OpenCode Zen 是独立的兼容线路，匿名可用性由 Zen
 网关决定。
 
-[![npm](https://img.shields.io/npm/v/@kilo-zen2dsh%2Fdsh-plugin)](https://www.npmjs.com/package/@kilo-zen2dsh/dsh-plugin)
-[![license](https://img.shields.io/npm/l/@kilo-zen2dsh%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo-zen2dsh/blob/master/LICENSE)
+[![npm](https://img.shields.io/npm/v/@huanx%2Fdsh-plugin)](https://www.npmjs.com/package/@huanx/dsh-plugin)
+[![license](https://img.shields.io/npm/l/@huanx%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo-zen2dsh/blob/master/LICENSE)
 
 [English](README.md) | 简体中文
 
@@ -42,7 +42,7 @@ Zen 网关决定。两条线路都不绕过认证或计费。
 ## 安装
 
 ```sh
-dsh plugin --profile web add @kilo-zen2dsh/dsh-plugin
+dsh plugin --profile web add @huanx/dsh-plugin
 ```
 
 如果 npm 包尚未发布，可在当前代码库中打包后安装：
@@ -51,7 +51,7 @@ dsh plugin --profile web add @kilo-zen2dsh/dsh-plugin
 cd packages/plugin
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./kilo-zen2dsh-dsh-plugin-0.3.0.tgz
+dsh plugin --profile web add ./huanx-dsh-plugin-0.3.0.tgz
 ```
 
 重启 `dsh web`，打开模型选择器，在 `kilo2dsh`（Kilo）或 `opencode2dsh`
@@ -64,7 +64,7 @@ dsh plugin --profile web add ./kilo-zen2dsh-dsh-plugin-0.3.0.tgz
 
 ```yaml
 - id: kilo2dsh
-  name: '@kilo-zen2dsh/dsh-plugin'
+  name: '@huanx/dsh-plugin'
   config:
     mode: adapter
     providerId: kilo2dsh
