@@ -1,4 +1,4 @@
-# kilo2dsh 实施计划与验收
+# kilo-zen2dsh 实施计划与验收
 
 > Kilo + OpenCode Zen 双免费层（2026-09-01）。Kilo 为默认迁移目标，Zen
 > 以独立 adapter 方式保留。

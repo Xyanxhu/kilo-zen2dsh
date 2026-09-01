@@ -1,5 +1,5 @@
 {
-  "name": "kilo2dsh",
+  "name": "kilo-zen2dsh",
   "private": true,
   "description": "Free Kilo Gateway and OpenCode Zen models for DeepSeek Harness (DSH) via native dsh-llm adapters.",
   "dsh": {
@@ -8,6 +8,6 @@
     }
   },
   "dependencies": {
-    "@kilo2dsh/dsh-plugin": "^0.3.0"
+    "@kilo-zen2dsh/dsh-plugin": "^0.3.0"
   }
 }

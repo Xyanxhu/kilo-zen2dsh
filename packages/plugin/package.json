@@ -1,5 +1,5 @@
 {
-  "name": "@kilo2dsh/dsh-plugin",
+  "name": "@kilo-zen2dsh/dsh-plugin",
   "version": "0.3.0",
   "description": "Free Kilo Gateway and OpenCode Zen models for DeepSeek Harness (DSH) via native dsh-llm adapters.",
   "type": "module",
@@ -18,10 +18,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Xyanxhu/kilo2dsh.git"
+    "url": "git+https://github.com/Xyanxhu/kilo-zen2dsh.git"
   },
-  "homepage": "https://github.com/Xyanxhu/kilo2dsh#readme",
-  "bugs": "https://github.com/Xyanxhu/kilo2dsh/issues",
+  "homepage": "https://github.com/Xyanxhu/kilo-zen2dsh#readme",
+  "bugs": "https://github.com/Xyanxhu/kilo-zen2dsh/issues",
   "author": "FishBottle7 (https://github.com/FishBottle7)",
   "engines": {
     "node": ">=20"

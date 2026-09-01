@@ -1,14 +1,14 @@
 <div align="center">
 
-# kilo2dsh
+# kilo-zen2dsh
 
 **Kilo Gateway and OpenCode Zen free models, natively inside DSH (DeepSeek Harness).**
 
 Kilo's free lane is keyless. OpenCode Zen is an independent, compatibility
 lane whose anonymous availability is controlled by the Zen gateway.
 
-[![npm](https://img.shields.io/npm/v/@kilo2dsh%2Fdsh-plugin)](https://www.npmjs.com/package/@kilo2dsh/dsh-plugin)
-[![license](https://img.shields.io/npm/l/@kilo2dsh%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo2dsh/blob/master/LICENSE)
+[![npm](https://img.shields.io/npm/v/@kilo-zen2dsh%2Fdsh-plugin)](https://www.npmjs.com/package/@kilo-zen2dsh/dsh-plugin)
+[![license](https://img.shields.io/npm/l/@kilo-zen2dsh%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo-zen2dsh/blob/master/LICENSE)
 
 English | [简体中文](README.zh-CN.md)
 
@@ -16,7 +16,7 @@ English | [简体中文](README.zh-CN.md)
 
 ---
 
-`kilo2dsh` registers native DSH `LlmAdapter`s backed by two independent
+`kilo-zen2dsh` registers native DSH `LlmAdapter`s backed by two independent
 OpenAI-compatible gateways:
 
 - `kilo2dsh` → Kilo Gateway (`/api/gateway/models` and
@@ -46,7 +46,7 @@ account. Neither provider is an authentication or billing bypass.
 ## Install
 
 ```sh
-dsh plugin --profile web add @kilo2dsh/dsh-plugin
+dsh plugin --profile web add @kilo-zen2dsh/dsh-plugin
 ```
 
 When using this checkout before the npm package is published, build a local
@@ -56,7 +56,7 @@ tarball instead:
 cd packages/plugin
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./kilo2dsh-dsh-plugin-0.3.0.tgz
+dsh plugin --profile web add ./kilo-zen2dsh-dsh-plugin-0.3.0.tgz
 ```
 
 Restart `dsh web`, open the model picker, and choose a model in either the
@@ -69,7 +69,7 @@ The defaults are keyless and point at the public Kilo gateway:
 
 ```yaml
 - id: kilo2dsh
-  name: '@kilo2dsh/dsh-plugin'
+  name: '@kilo-zen2dsh/dsh-plugin'
   config:
     mode: adapter
     providerId: kilo2dsh

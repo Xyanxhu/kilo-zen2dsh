@@ -1,14 +1,14 @@
 <div align="center">
 
-# kilo2dsh
+# kilo-zen2dsh
 
 **在 DSH（DeepSeek Harness）中原生使用 Kilo Gateway 与 OpenCode Zen 免费模型。**
 
 Kilo 免费层无需 Key；OpenCode Zen 是独立的兼容线路，匿名可用性由 Zen
 网关决定。
 
-[![npm](https://img.shields.io/npm/v/@kilo2dsh%2Fdsh-plugin)](https://www.npmjs.com/package/@kilo2dsh/dsh-plugin)
-[![license](https://img.shields.io/npm/l/@kilo2dsh%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo2dsh/blob/master/LICENSE)
+[![npm](https://img.shields.io/npm/v/@kilo-zen2dsh%2Fdsh-plugin)](https://www.npmjs.com/package/@kilo-zen2dsh/dsh-plugin)
+[![license](https://img.shields.io/npm/l/@kilo-zen2dsh%2Fdsh-plugin)](https://github.com/Xyanxhu/kilo-zen2dsh/blob/master/LICENSE)
 
 [English](README.md) | 简体中文
 
@@ -16,7 +16,7 @@ Kilo 免费层无需 Key；OpenCode Zen 是独立的兼容线路，匿名可用�
 
 ---
 
-`kilo2dsh` 向 DSH 注册两个彼此独立的原生 `LlmAdapter`：
+`kilo-zen2dsh` 向 DSH 注册两个彼此独立的原生 `LlmAdapter`：
 
 - `kilo2dsh`：Kilo Gateway，模型发现 `/api/gateway/models`，对话
   `/api/gateway/chat/completions`
@@ -42,7 +42,7 @@ Zen 网关决定。两条线路都不绕过认证或计费。
 ## 安装
 
 ```sh
-dsh plugin --profile web add @kilo2dsh/dsh-plugin
+dsh plugin --profile web add @kilo-zen2dsh/dsh-plugin
 ```
 
 如果 npm 包尚未发布，可在当前代码库中打包后安装：
@@ -51,7 +51,7 @@ dsh plugin --profile web add @kilo2dsh/dsh-plugin
 cd packages/plugin
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./kilo2dsh-dsh-plugin-0.3.0.tgz
+dsh plugin --profile web add ./kilo-zen2dsh-dsh-plugin-0.3.0.tgz
 ```
 
 重启 `dsh web`，打开模型选择器，在 `kilo2dsh`（Kilo）或 `opencode2dsh`
@@ -64,7 +64,7 @@ dsh plugin --profile web add ./kilo2dsh-dsh-plugin-0.3.0.tgz
 
 ```yaml
 - id: kilo2dsh
-  name: '@kilo2dsh/dsh-plugin'
+  name: '@kilo-zen2dsh/dsh-plugin'
   config:
     mode: adapter
     providerId: kilo2dsh

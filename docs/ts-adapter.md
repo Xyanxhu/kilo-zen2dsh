@@ -1,4 +1,4 @@
-# kilo2dsh TypeScript adapters
+# kilo-zen2dsh TypeScript adapters
 
 > 当前实现说明（2026-09-01）。本文件记录 Kilo 免费层迁移以及保留的
 > OpenCode Zen 兼容层。

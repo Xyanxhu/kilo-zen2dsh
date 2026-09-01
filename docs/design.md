@@ -1,11 +1,11 @@
-# kilo2dsh 架构设计
+# kilo-zen2dsh 架构设计
 
 > 版本：Kilo + OpenCode Zen 双免费层（2026-09-01）。Kilo 是默认迁移目标，
 > Zen 作为独立兼容 provider 保留。
 
 ## 1. 定位
 
-`kilo2dsh` 是一个 DSH cordis 插件：在 DSH 进程内注册 Kilo 和 OpenCode Zen
+`kilo-zen2dsh` 是一个 DSH cordis 插件：在 DSH 进程内注册 Kilo 和 OpenCode Zen
 两个 provider，分别发现各自网关的免费模型，并以 OpenAI 兼容流式协议返回
 结果。发布包默认不需要 Go 二进制。
 
