@@ -1,7 +1,7 @@
 {
   "name": "@kilo2dsh/dsh-plugin",
   "version": "0.3.0",
-  "description": "Free Kilo Gateway models for DeepSeek Harness (DSH): native dsh-llm adapter plugin, no API key.",
+  "description": "Free Kilo Gateway and OpenCode Zen models for DeepSeek Harness (DSH) via native dsh-llm adapters.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -43,6 +43,9 @@
     "deepseek-harness",
     "kilo",
     "kilo-gateway",
+    "opencode",
+    "opencode-zen",
+    "zen",
     "cordis",
     "cordis-plugin",
     "llm-adapter",

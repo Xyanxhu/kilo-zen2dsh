@@ -1,5 +1,6 @@
 import { createProvider, type Api, type Context, type Model, type ProviderHeaders, type ThinkingLevel } from '@earendil-works/pi-ai'
 import * as openaiCompletions from '@earendil-works/pi-ai/api/openai-completions'
+import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses'
 
 import {
   ANONYMOUS_API_KEY,
@@ -43,6 +44,18 @@ export interface KiloAdapterOptions {
   userAgent?: string
   /** Value sent in Kilo's editor-name header. */
   editorName?: string
+  /** Display name shown by DSH for this adapter. */
+  displayName?: string
+  /** Label shown by pi-ai when an account credential is requested. */
+  authName?: string
+  /** Private transport key used when the configured lane is keyless. */
+  keylessTransportKey?: string
+  /** Namespace used when deriving stable project correlation IDs. */
+  projectNamespace?: string
+  /** Provider-specific request header builder (Kilo is the default). */
+  headerBuilder?: (ids: RequestIDs, options: KiloAdapterOptions, mode?: unknown) => Record<string, string>
+  /** Select the OpenAI-compatible API for a model (Kilo defaults to chat completions). */
+  apiResolver?: (model: KiloModel) => Api
 }
 
 function numeric(value: unknown, fallback: number): number {
@@ -66,18 +79,21 @@ function modelToPiModel(
   providerId: string,
   gatewayBaseUrl: string,
   headers: Record<string, string>,
+  api: Api = 'openai-completions',
 ): Model<Api> {
   const info = modelInfo(model)
   const pricing = model.pricing ?? {}
   const zero = 0
   const input = numeric(pricing.prompt ?? pricing.input, zero)
   const output = numeric(pricing.completion ?? pricing.output, zero)
-  return {
+  const base = {
     id: model.id,
     name: info.name,
-    api: 'openai-completions',
+    api,
     provider: providerId,
-    // Kilo's documented endpoint is /api/gateway/chat/completions (no /v1).
+    // Kilo's documented endpoint is /api/gateway/chat/completions (no /v1);
+    // Zen's responses-capable models use the same base and let pi-ai append
+    // `/responses` based on the selected API.
     baseUrl: gatewayBaseUrl.replace(/\/+$/, ''),
     reasoning: info.reasoning,
     input: ['text'],
@@ -85,6 +101,19 @@ function modelToPiModel(
     contextWindow: info.contextWindow || DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.maxTokens || DEFAULT_MAX_TOKENS,
     headers,
+  }
+  if (api === 'openai-responses') {
+    return {
+      ...base,
+      compat: {
+        supportsDeveloperRole: true,
+        supportsStrictMode: false,
+        supportsLongCacheRetention: false,
+      },
+    } as Model<Api>
+  }
+  return {
+    ...base,
     compat: {
       // Kilo's gateway follows the OpenRouter reasoning field conventions.
       thinkingFormat: 'openrouter',
@@ -95,7 +124,7 @@ function modelToPiModel(
       sendSessionAffinityHeaders: false,
       supportsLongCacheRetention: false,
     },
-  }
+  } as Model<Api>
 }
 
 function fallbackModel(id: string): KiloModel {
@@ -113,9 +142,10 @@ function fallbackModel(id: string): KiloModel {
 /** Build the adapter's Kilo-specific request headers. */
 function requestHeaders(
   ids: RequestIDs,
-  options: Pick<KiloAdapterOptions, 'userAgent' | 'editorName'>,
+  options: KiloAdapterOptions,
   mode?: unknown,
 ): Record<string, string> {
+  if (options.headerBuilder) return options.headerBuilder(ids, options, mode)
   const headers = kiloHeaders(ids, {
     userAgent: options.userAgent ?? kiloUserAgent(),
     editorName: options.editorName ?? 'DSH/kilo2dsh',
@@ -140,7 +170,9 @@ export class KiloAdapter {
   /** Non-empty value used only to satisfy pi-ai/OpenAI client construction. */
   readonly #transportApiKey: string
   readonly #anonymousKey: string
+  readonly #providerName: string
   readonly #options: KiloAdapterOptions
+  readonly #apiResolver: (model: KiloModel) => Api
 
   constructor(catalog: CatalogLike, options: KiloAdapterOptions = {}) {
     this.#catalog = catalog
@@ -148,15 +180,17 @@ export class KiloAdapter {
     this.#gatewayBaseUrl = (options.gatewayBaseUrl ?? options.zenBaseUrl ?? KILO_GATEWAY_BASE_URL).replace(/\/+$/, '')
     this.#anonymousKey = options.anonymousKey?.trim() || ANONYMOUS_API_KEY
     this.#apiKey = options.apiKey?.trim() || this.#anonymousKey
-    this.#transportApiKey = this.#apiKey || KEYLESS_TRANSPORT_KEY
+    this.#transportApiKey = this.#apiKey || options.keylessTransportKey?.trim() || KEYLESS_TRANSPORT_KEY
+    this.#providerName = options.displayName?.trim() || 'Kilo Gateway (free)'
     this.#options = options
+    this.#apiResolver = options.apiResolver ?? (() => 'openai-completions')
     this.#provider = createProvider<Api>({
       id: this.#providerId,
-      name: 'Kilo Gateway (free)',
+      name: this.#providerName,
       baseUrl: this.#gatewayBaseUrl,
       auth: {
         apiKey: {
-          name: 'Kilo Gateway API key (optional)',
+          name: options.authName?.trim() || 'Kilo Gateway API key (optional)',
           resolve: async () => ({
             auth: { apiKey: this.#transportApiKey },
             ...(this.#apiKey ? {} : { headers: { authorization: null } }),
@@ -164,12 +198,15 @@ export class KiloAdapter {
         },
       },
       models: [],
-      api: openaiCompletions,
+      api: {
+        'openai-completions': openaiCompletions,
+        'openai-responses': openaiResponses,
+      },
     })
   }
 
   providerInfo(provider: string): { id: string; name: string } {
-    return { id: provider, name: 'Kilo Gateway (free)' }
+    return { id: provider, name: this.#providerName }
   }
 
   /** Let DSH own retry policy; the gateway itself enforces IP limits. */
@@ -217,16 +254,16 @@ export class KiloAdapter {
     return { model: this.resolveModel(provider, model), stream: (options) => this.stream(options) }
   }
 
-  /** Stream one chat turn through Kilo's OpenAI-compatible endpoint. */
+  /** Stream one turn through the configured OpenAI-compatible endpoint. */
   async *stream(options: HarnessGenerateOptions): AsyncGenerator<HarnessChunk> {
     const modelId = options.model.trim()
     const decision = this.#catalog.decision(modelId)
     if (!decision.allowed) {
-      throw new Error(`kilo2dsh: model "${modelId}" is not available in the free Kilo catalog (${decision.source})`)
+      throw new Error(`${this.#providerId}: model "${modelId}" is not available in the configured free catalog (${decision.source})`)
     }
 
     const context = toPiContext(options)
-    const ids = deriveRequestIDs(options.messages)
+    const ids = deriveRequestIDs(options.messages, this.#options.projectNamespace ?? 'kilo2dsh:default-project')
     const detail = this.#catalog.get?.(modelId) ?? fallbackModel(modelId)
     const baseHeaders = requestHeaders(ids, this.#options, options.mode)
     const headers: ProviderHeaders = { ...baseHeaders }
@@ -236,7 +273,7 @@ export class KiloAdapter {
       // the SDK-supported way to remove that generated header.
       headers.authorization = null
     }
-    const model = modelToPiModel(detail, this.#providerId, this.#gatewayBaseUrl, baseHeaders)
+    const model = modelToPiModel(detail, this.#providerId, this.#gatewayBaseUrl, baseHeaders, this.#apiResolver(detail))
     const events = this.#provider.streamSimple(model, context as unknown as Context, {
       apiKey: this.#transportApiKey,
       sessionId: ids.session,
@@ -262,7 +299,7 @@ export class KiloAdapter {
 }
 
 /** Build an adapter over a live Kilo catalog. */
-export function createKiloAdapter(catalog: ModelCatalog, options?: KiloAdapterOptions): KiloAdapter {
+export function createKiloAdapter(catalog: CatalogLike, options?: KiloAdapterOptions): KiloAdapter {
   return new KiloAdapter(catalog, options)
 }
 

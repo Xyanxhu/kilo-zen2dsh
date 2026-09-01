@@ -1,7 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { conversationSeed, deriveRequestIDs, kiloHeaders, kiloUserAgent, randomID, stableID } from '../src/adapter/ids.ts'
+import {
+  conversationSeed,
+  deriveRequestIDs,
+  kiloHeaders,
+  kiloUserAgent,
+  opencodeHeaders,
+  opencodeUserAgent,
+  randomID,
+  stableID,
+} from '../src/adapter/ids.ts'
 
 test('stableID is deterministic and sha256-truncated', () => {
   const first = stableID('ses', 'hello')
@@ -66,4 +75,17 @@ test('kiloHeaders carries Kilo correlation headers without CLI spoofing', () => 
   assert.equal(headers['x-kilocode-projectid'], ids.project)
   assert.equal(headers['x-opencode-client'], undefined)
   assert.ok(headers['user-agent'].startsWith('kilo2dsh'))
+})
+
+test('opencodeHeaders carries Zen compatibility identifiers independently', () => {
+  const ids = deriveRequestIDs([{ role: 'user', content: 'hello' }], 'opencode2dsh:default-project')
+  const headers = opencodeHeaders(ids)
+  assert.equal(headers['user-agent'], opencodeUserAgent())
+  assert.equal(headers['x-opencode-client'], 'cli')
+  assert.equal(headers['x-opencode-session'], ids.session)
+  assert.equal(headers['x-session-affinity'], ids.session)
+  assert.equal(headers['X-Session-Id'], ids.session)
+  assert.equal(headers['x-opencode-request'], ids.request)
+  assert.equal(headers['x-opencode-project'], ids.project)
+  assert.equal(headers['x-kilocode-editorname'], undefined)
 })

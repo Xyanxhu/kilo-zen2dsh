@@ -1,8 +1,8 @@
 # kilo2dsh DSH plugin — bundle patch: insert the plugin row (deployment-global).
 #
-# Defaults need no edits: the plugin spawns the agent on a random loopback port,
-# generates/persists the local token, and registers itself into llm-pi-ai.
-# Override any option via the config object below (see src/config.ts).
+# Defaults need no edits: native adapter mode registers the Kilo and OpenCode
+# Zen free-provider routes without a child process. Override any option via the
+# config object below (see src/config.ts); set zenEnabled: false for Kilo only.
 - insert:
     - id: kilo2dsh
       name: '@kilo2dsh/dsh-plugin'

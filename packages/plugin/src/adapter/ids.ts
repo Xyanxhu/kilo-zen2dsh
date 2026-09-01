@@ -38,13 +38,16 @@ export function conversationSeed(messages: Array<{ role: string; content: unknow
 }
 
 /** Derive stable per-conversation and per-request IDs without storing content. */
-export function deriveRequestIDs(messages: Array<{ role: string; content: unknown }>): RequestIDs {
+export function deriveRequestIDs(
+  messages: Array<{ role: string; content: unknown }>,
+  projectNamespace = 'kilo2dsh:default-project',
+): RequestIDs {
   let signal = conversationSeed(messages)
   if (signal === '' || signal === '{}') signal = randomID('fallback', 16)
   return {
     session: stableID('ses', signal),
     request: randomID('req', 16),
-    project: stableID('prj', 'kilo2dsh:default-project'),
+    project: stableID('prj', projectNamespace),
     parentSession: '',
   }
 }
@@ -53,6 +56,17 @@ export function deriveRequestIDs(messages: Array<{ role: string; content: unknow
 export function kiloUserAgent(): string {
   const version = process.env.KILO2DSH_VERSION?.trim()
   return version ? `${KILO_USER_AGENT}/${version}` : KILO_USER_AGENT
+}
+
+/**
+ * OpenCode-compatible user agent used only by the optional Zen free lane.
+ * Zen currently gates anonymous free requests on this marker; keep the
+ * version override explicit so users can update it without rebuilding.
+ * Observed behavior: https://github.com/anomalyco/opencode/issues/42500
+ */
+export function opencodeUserAgent(): string {
+  const version = process.env.OPENCODE2DSH_VERSION?.trim() || '1.18.21'
+  return `opencode/${version} (${process.platform} ${process.arch}; node${process.versions.node})`
 }
 
 export interface KiloHeaderOptions {
@@ -79,6 +93,23 @@ export function kiloHeaders(ids: RequestIDs, options: KiloHeaderOptions = {}): R
   return headers
 }
 
+export interface OpenCodeHeaderOptions {
+  userAgent?: string
+  client?: string
+}
+
+/** Headers expected by the OpenCode Zen compatibility/free lane. */
+export function opencodeHeaders(ids: RequestIDs, options: OpenCodeHeaderOptions = {}): Record<string, string> {
+  return {
+    'user-agent': options.userAgent ?? opencodeUserAgent(),
+    'x-opencode-client': options.client ?? 'cli',
+    'x-opencode-session': ids.session,
+    'x-session-affinity': ids.session,
+    'X-Session-Id': ids.session,
+    'x-opencode-request': ids.request,
+    'x-opencode-project': ids.project,
+  }
+}
+
 /** Compatibility spelling retained for downstream users of opencode2dsh. */
-export const opencodeUserAgent = kiloUserAgent
-export const disguiseHeaders = kiloHeaders
+export const disguiseHeaders = opencodeHeaders

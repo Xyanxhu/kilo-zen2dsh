@@ -9,8 +9,17 @@ import { dirname, join } from 'node:path'
 export const KILO_API_BASE_URL = 'https://api.kilo.ai'
 export const KILO_GATEWAY_BASE_URL = `${KILO_API_BASE_URL}/api/gateway`
 export const KILO_MODELS_URL = `${KILO_GATEWAY_BASE_URL}/models`
-/** @deprecated Use KILO_GATEWAY_BASE_URL. */
-export const ZEN_BASE_URL = KILO_GATEWAY_BASE_URL
+/** OpenCode Zen's public OpenAI-compatible API root. */
+export const OPENCODE_ZEN_BASE_URL = 'https://opencode.ai/zen'
+export const OPENCODE_ZEN_GATEWAY_BASE_URL = `${OPENCODE_ZEN_BASE_URL}/v1`
+export const OPENCODE_ZEN_MODELS_URL = `${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`
+/**
+ * Public placeholder used by OpenCode itself when no Zen account key exists.
+ * Source: https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/provider/provider.ts
+ */
+export const OPENCODE_ZEN_ANONYMOUS_API_KEY = 'public'
+/** @deprecated Use OPENCODE_ZEN_BASE_URL for Zen or KILO_GATEWAY_BASE_URL for Kilo. */
+export const ZEN_BASE_URL = OPENCODE_ZEN_BASE_URL
 /**
  * Kilo's free lane is keyless.  Keep this export for callers that used the
  * old adapter's anonymous-key option, but deliberately make the default an
@@ -33,6 +42,28 @@ export const staticFreeModels: string[] = [
 
 /** Reserved for IDs seen in the catalog but not yet verified by a chat call. */
 export const staticFreeCandidates: string[] = []
+
+/**
+ * OpenCode's documented Zen free models plus the reference project's
+ * previously verified `hy3-free` route. The live `/v1/models` response is
+ * authoritative; this list is only used while discovery is unavailable.
+ * Zen's model endpoint currently returns IDs without pricing/capability data,
+ * so the free suffix and the explicit `big-pickle` exception are the safe
+ * local signal.
+ * Source: https://dev.opencode.ai/docs/zen (free-model pricing/endpoints).
+ */
+export const zenStaticFreeModels: string[] = [
+  'big-pickle',
+  'hy3-free',
+  'mimo-v2.5-free',
+  'ling-3.0-flash-fin-free',
+  'nemotron-3-ultra-free',
+  'nemotron-3.5-lightning-free',
+  'muse-spark-1.2-contributor-free',
+]
+
+/** Reserved for IDs observed in a live Zen catalog but not yet verified locally. */
+export const zenStaticFreeCandidates: string[] = ['deepseek-v4-flash-free', 'laguna-s-2.1-free']
 
 export interface KiloPricing {
   prompt?: string | number | null
@@ -103,11 +134,28 @@ export interface ModelPrice {
 const DEFAULT_CONTEXT_WINDOW = 262144
 const DEFAULT_MAX_TOKENS = 32768
 
+function optionalTrim(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
+}
+
 function asFiniteNumber(value: unknown): number | undefined {
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
   if (typeof value === 'string' && value.trim() !== '') {
     const parsed = Number(value)
     return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+/** Accept the boolean spellings used by JSON gateways without guessing unknown values. */
+function explicitBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number' && (value === 0 || value === 1)) return value === 1
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes') return true
+    if (normalized === 'false' || normalized === '0' || normalized === 'no') return false
   }
   return undefined
 }
@@ -130,6 +178,11 @@ function hasFreeSuffix(id: string): boolean {
   return lower === 'kilo-auto/free' || lower === 'openrouter/free' || lower.endsWith(':free') || lower.endsWith('-free')
 }
 
+function hasZenFreeName(id: string): boolean {
+  const lower = id.toLowerCase()
+  return lower === 'big-pickle' || lower.endsWith(':free') || lower.endsWith('-free')
+}
+
 /**
  * Decide whether a Kilo model is part of the free lane.
  *
@@ -145,11 +198,13 @@ export function isFreeModel(value: string | KiloModel | unknown): boolean {
 
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const model = value as KiloModel
-    if (model.deprecated === true) return false
+    if (explicitBoolean(model.deprecated) === true) return false
     // Match Kilo/QwenPaw field precedence exactly: camelCase first, then the
     // legacy snake_case spelling. Only absent flags use the name fallback.
-    if (typeof model.isFree === 'boolean') return model.isFree
-    if (typeof model.is_free === 'boolean') return model.is_free
+    const camelFlag = explicitBoolean(model.isFree)
+    if (camelFlag !== undefined) return camelFlag
+    const snakeFlag = explicitBoolean(model.is_free)
+    if (snakeFlag !== undefined) return snakeFlag
     const pricing = model.pricing ?? undefined
     const prompt = pricing?.prompt ?? pricing?.input
     const completion = pricing?.completion ?? pricing?.output
@@ -160,6 +215,27 @@ export function isFreeModel(value: string | KiloModel | unknown): boolean {
   }
 
   return hasFreeSuffix(id)
+}
+
+/**
+ * Decide whether a model exposed by OpenCode Zen belongs to its free lane.
+ * Zen's public `/v1/models` records do not currently include pricing or an
+ * `isFree` flag, so only the documented `*-free`/`*:free` names and the
+ * documented `big-pickle` exception are accepted. Explicit flags, when a
+ * future deployment supplies them, remain authoritative.
+ */
+export function isZenFreeModel(value: string | KiloModel | unknown): boolean {
+  const id = modelId(value)
+  if (!id) return false
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const model = value as KiloModel
+    if (explicitBoolean(model.deprecated) === true) return false
+    const camelFlag = explicitBoolean(model.isFree)
+    if (camelFlag !== undefined) return camelFlag
+    const snakeFlag = explicitBoolean(model.is_free)
+    if (snakeFlag !== undefined) return snakeFlag
+  }
+  return hasZenFreeName(id)
 }
 
 function isTextOutputModel(model: KiloModel): boolean {
@@ -312,6 +388,20 @@ export interface CatalogOptions {
   apiKey?: string
   /** Custom anonymous token for compatible gateway deployments. */
   anonymousKey?: string
+  /** Static bootstrap IDs used only before a live snapshot is available. */
+  staticModels?: readonly string[]
+  /** Static IDs that may be admitted while discovery is pending. */
+  staticCandidates?: readonly string[]
+  /** Provider-specific free-model classifier. Defaults to Kilo rules. */
+  freePredicate?: (value: string | KiloModel | unknown) => boolean
+  /** User-Agent sent to the model directory. */
+  userAgent?: string
+  /** Provider-specific model-directory fetcher. */
+  fetchCatalog?: CatalogFetcher
+  /** Human-readable provider label used in diagnostics. */
+  catalogLabel?: string
+  /** Additional headers sent to the model directory. */
+  extraHeaders?: Record<string, string>
   /** Require an explicit `tools` capability for exposed agent models. */
   requireTools?: boolean
   fetchImpl?: typeof fetch
@@ -320,6 +410,12 @@ export interface CatalogOptions {
   startupRetryMs?: number
   staleAfterMs?: number
 }
+
+export type CatalogFetcher = (
+  modelsUrl: string,
+  fetchImpl: typeof fetch,
+  options?: FetchKiloModelsOptions,
+) => Promise<KiloModel[]>
 
 const FETCH_TIMEOUT_MS = 30_000
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
@@ -343,6 +439,13 @@ export class ModelCatalog {
   #modelsUrl: string
   #apiKey?: string
   #anonymousKey: string
+  #staticModels: string[]
+  #staticCandidates: string[]
+  #freePredicate: (value: string | KiloModel | unknown) => boolean
+  #userAgent: string
+  #extraHeaders: Record<string, string>
+  #fetchCatalog: CatalogFetcher
+  #catalogLabel: string
   #requireTools: boolean
   #fetch: typeof fetch
   #now: () => number
@@ -355,10 +458,20 @@ export class ModelCatalog {
   constructor(options: CatalogOptions = {}) {
     this.#refreshSeconds = Math.max(1, options.refreshSeconds ?? 300)
     this.#cachePath = options.cachePath
-    const gatewayBase = options.gatewayBaseUrl ?? options.zenBaseUrl ?? KILO_GATEWAY_BASE_URL
-    this.#modelsUrl = options.modelsUrl ?? `${gatewayBase.replace(/\/+$/, '')}/models`
+    const gatewayBase = optionalTrim(options.gatewayBaseUrl) ?? optionalTrim(options.zenBaseUrl) ?? KILO_GATEWAY_BASE_URL
+    this.#modelsUrl = optionalTrim(options.modelsUrl) ?? `${gatewayBase.replace(/\/+$/, '')}/models`
     this.#apiKey = options.apiKey?.trim() || undefined
-    this.#anonymousKey = options.anonymousKey ?? ANONYMOUS_API_KEY
+    // Preserve an explicitly supplied empty string: Zen callers can use it to
+    // request a truly header-less deployment instead of falling back to
+    // `public`. Whitespace-only values are treated as empty as well.
+    this.#anonymousKey = options.anonymousKey === undefined ? ANONYMOUS_API_KEY : options.anonymousKey?.trim() ?? ''
+    this.#staticModels = [...(options.staticModels ?? staticFreeModels)]
+    this.#staticCandidates = [...(options.staticCandidates ?? staticFreeCandidates)]
+    this.#freePredicate = options.freePredicate ?? isFreeModel
+    this.#userAgent = options.userAgent?.trim() || KILO_USER_AGENT
+    this.#extraHeaders = { ...(options.extraHeaders ?? {}) }
+    this.#fetchCatalog = options.fetchCatalog ?? fetchKiloModelCatalog
+    this.#catalogLabel = options.catalogLabel?.trim() || 'Kilo'
     this.#requireTools = options.requireTools ?? true
     this.#fetch = options.fetchImpl ?? fetch
     this.#now = options.now ?? Date.now
@@ -400,11 +513,13 @@ export class ModelCatalog {
 
   async refreshGateway(): Promise<void> {
     try {
-      const models = await fetchKiloModelCatalog(this.#modelsUrl, this.#fetch, {
+      const models = await this.#fetchCatalog(this.#modelsUrl, this.#fetch, {
         apiKey: this.#apiKey,
         anonymousKey: this.#anonymousKey,
+        userAgent: this.#userAgent,
+        extraHeaders: this.#extraHeaders,
       })
-      if (models.length === 0) throw new Error('Kilo models endpoint returned an empty list')
+      if (models.length === 0) throw new Error(`${this.#catalogLabel} models endpoint returned an empty list`)
       this.#models = new Map(models.map((model) => [model.id, model]))
       this.#updatedAt = this.#now()
       this.#lastError = ''
@@ -434,16 +549,16 @@ export class ModelCatalog {
     const id = model.trim()
     const live = this.#models.get(id)
     if (live) {
-      if (!isFreeModel(live)) return { allowed: false, source: 'catalog_paid', known: true }
+      if (!this.#freePredicate(live)) return { allowed: false, source: 'catalog_paid', known: true }
       if (!isTextOutputModel(live)) return { allowed: false, source: 'catalog_output_unsupported', known: true }
       if (this.#requireTools && !supportsTools(live)) return { allowed: false, source: 'catalog_tools_unsupported', known: true }
       return { allowed: true, source: 'catalog_free', known: true }
     }
     if (this.#models.size === 0) {
-      if (staticFreeModels.includes(id) || staticFreeCandidates.includes(id)) {
+      if (this.#staticModels.includes(id) || this.#staticCandidates.includes(id)) {
         return { allowed: true, source: 'static_verified', known: false }
       }
-      if (isFreeModel(id)) return { allowed: true, source: 'name_free_pending', known: false }
+      if (this.#freePredicate(id)) return { allowed: true, source: 'name_free_pending', known: false }
       return { allowed: false, source: 'catalog_pending', known: false }
     }
     return { allowed: false, source: 'catalog_missing', known: false }
@@ -451,7 +566,7 @@ export class ModelCatalog {
 
   /** IDs exposed to DSH: live free text models, or static bootstrap IDs. */
   list(): string[] {
-    if (this.#models.size === 0) return [...staticFreeModels]
+    if (this.#models.size === 0) return [...this.#staticModels]
     const out: string[] = []
     for (const model of this.#models.values()) {
       if (this.decision(model.id).allowed) out.push(model.id)
@@ -492,12 +607,40 @@ export class ModelCatalog {
   }
 }
 
+/**
+ * OpenCode Zen variant of ModelCatalog. It keeps a separate cache and free
+ * classifier because Zen's `/v1/models` response is a minimal OpenAI list,
+ * unlike Kilo's richer gateway records.
+ */
+export class ZenModelCatalog extends ModelCatalog {
+  constructor(options: CatalogOptions = {}) {
+    const zenGateway = normalizeZenGatewayUrl(optionalTrim(options.gatewayBaseUrl) ?? optionalTrim(options.zenBaseUrl) ?? OPENCODE_ZEN_BASE_URL)
+    super({
+      ...options,
+      gatewayBaseUrl: zenGateway,
+      modelsUrl: optionalTrim(options.modelsUrl) ?? `${zenGateway}/models`,
+      anonymousKey: options.anonymousKey ?? OPENCODE_ZEN_ANONYMOUS_API_KEY,
+      staticModels: options.staticModels ?? zenStaticFreeModels,
+      staticCandidates: options.staticCandidates ?? zenStaticFreeCandidates,
+      freePredicate: options.freePredicate ?? isZenFreeModel,
+      userAgent: options.userAgent?.trim() || defaultOpenCodeZenUserAgent(),
+      extraHeaders: { 'x-opencode-client': 'cli', ...(options.extraHeaders ?? {}) },
+      fetchCatalog: options.fetchCatalog ?? fetchZenCatalogAtUrl,
+      catalogLabel: options.catalogLabel ?? 'OpenCode Zen',
+    })
+  }
+}
+
 export interface FetchKiloModelsOptions {
   apiKey?: string
   anonymousKey?: string
   userAgent?: string
+  extraHeaders?: Record<string, string>
   signal?: AbortSignal
 }
+
+/** Provider-neutral spelling for Zen callers; fields are identical. */
+export type FetchZenModelsOptions = FetchKiloModelsOptions
 
 /** Fetch and decode the full Kilo model catalog. */
 export async function fetchKiloModelCatalog(
@@ -513,7 +656,8 @@ export async function fetchKiloModelCatalog(
       method: 'GET',
       headers: {
         accept: 'application/json',
-        'user-agent': options.userAgent ?? KILO_USER_AGENT,
+        'user-agent': options.userAgent?.trim() || KILO_USER_AGENT,
+        ...(options.extraHeaders ?? {}),
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
       signal: options.signal,
@@ -541,8 +685,76 @@ export async function fetchKiloModels(
   return (await fetchKiloModelCatalog(modelsUrl, fetchImpl, options)).map((model) => model.id)
 }
 
-/** Old spelling retained so third-party callers can migrate gradually. */
-export const fetchZenModels = fetchKiloModels
+/** Fetch and decode OpenCode Zen's `/v1/models` catalog. */
+export async function fetchZenModelCatalog(
+  zenBaseOrModelsUrl: string,
+  fetchImpl: typeof fetch = fetch,
+  options: FetchKiloModelsOptions = {},
+): Promise<KiloModel[]> {
+  const modelsUrl = normalizeZenModelsUrl(zenBaseOrModelsUrl)
+  return fetchZenCatalogAtUrl(modelsUrl, fetchImpl, options)
+}
+
+/**
+ * Zen's anonymous lane uses the public placeholder and OpenCode-compatible
+ * client marker. An explicitly supplied key replaces `public` as usual.
+ */
+export async function fetchZenCatalogAtUrl(
+  modelsUrl: string,
+  fetchImpl: typeof fetch = fetch,
+  options: FetchKiloModelsOptions = {},
+): Promise<KiloModel[]> {
+  const configuredApiKey = options.apiKey?.trim()
+  const configuredAnonymousKey =
+    options.anonymousKey === undefined ? undefined : options.anonymousKey?.trim() ?? ''
+  const token = configuredApiKey || configuredAnonymousKey || (configuredAnonymousKey === '' ? '' : OPENCODE_ZEN_ANONYMOUS_API_KEY)
+  const response = await fetchWithTimeout(
+    fetchImpl,
+    modelsUrl,
+    {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        'user-agent': options.userAgent?.trim() || defaultOpenCodeZenUserAgent(),
+        'x-opencode-client': 'cli',
+        ...(options.extraHeaders ?? {}),
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      signal: options.signal,
+    },
+  )
+  if (!response.ok) throw new Error(`OpenCode Zen models endpoint returned HTTP ${response.status}`)
+  const models = decodeKiloModels(await response.json())
+  if (models.length === 0) throw new Error('OpenCode Zen models endpoint returned an empty list')
+  return models
+}
+
+/** Old ID-only spelling retained for callers of the original Zen adapter. */
+export async function fetchZenModels(
+  zenBaseOrModelsUrl: string,
+  fetchImpl: typeof fetch = fetch,
+  optionsOrUserAgent: FetchKiloModelsOptions | string = {},
+): Promise<string[]> {
+  const options = typeof optionsOrUserAgent === 'string' ? { userAgent: optionsOrUserAgent } : optionsOrUserAgent
+  return (await fetchZenModelCatalog(zenBaseOrModelsUrl, fetchImpl, options)).map((model) => model.id)
+}
+
+export function normalizeZenModelsUrl(value: string): string {
+  const trimmed = (value.trim() || OPENCODE_ZEN_BASE_URL).replace(/\/+$/, '')
+  if (/\/models$/i.test(trimmed)) return trimmed
+  if (/\/v1$/i.test(trimmed)) return `${trimmed}/models`
+  return `${trimmed}/v1/models`
+}
+
+export function normalizeZenGatewayUrl(value: string): string {
+  const trimmed = (value.trim() || OPENCODE_ZEN_BASE_URL).replace(/\/+$/, '')
+  return /\/v1$/i.test(trimmed) ? trimmed : `${trimmed}/v1`
+}
+
+function defaultOpenCodeZenUserAgent(): string {
+  const version = process.env.OPENCODE2DSH_VERSION?.trim() || '1.18.21'
+  return `opencode/${version} (${process.platform} ${process.arch}; node${process.versions.node})`
+}
 
 async function fetchWithTimeout(
   fetchImpl: typeof fetch,
@@ -586,6 +798,11 @@ async function loadModelCache(path: string, now: number): Promise<ModelCache> {
 /** Default cache location next to the plugin data directory. */
 export function defaultCachePath(dataDir: string): string {
   return join(dataDir, 'kilo-models.json')
+}
+
+/** Default cache location for the independent OpenCode Zen catalog. */
+export function defaultZenCachePath(dataDir: string): string {
+  return join(dataDir, 'zen-models.json')
 }
 
 // ---------------------------------------------------------------------------

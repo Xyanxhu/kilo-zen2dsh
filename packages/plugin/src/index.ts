@@ -3,8 +3,15 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 
-import { ModelCatalog, defaultCachePath, type CatalogSnapshot } from './adapter/catalog.ts'
+import {
+  ModelCatalog,
+  ZenModelCatalog,
+  defaultCachePath,
+  defaultZenCachePath,
+  type CatalogSnapshot,
+} from './adapter/catalog.ts'
 import { KiloAdapter } from './adapter/kilo-adapter.ts'
+import { ZenAdapter } from './adapter/zen-adapter.ts'
 import { AgentProcess, type ReadyInfo } from './agent-process.js'
 import { configPaths, ensureToken, resolveConfig, writeAgentConfig, type Kilo2dshConfig } from './config.js'
 import { fetchHealth, fetchModels, registerProvider, removeProviderRoute } from './provider.js'
@@ -13,8 +20,9 @@ import { fetchHealth, fetchModels, registerProvider, removeProviderRoute } from 
  * kilo2dsh DSH cordis plugin entry.
  *
  * Two modes (config.mode, default `adapter`):
- *  - adapter: register a DSH LlmAdapter streaming directly from the Kilo
- *    anonymous lane (marketplace shape: no child process, no binary).
+ *  - adapter: register DSH LlmAdapters streaming directly from the Kilo and
+ *    (by default) OpenCode Zen free lanes (marketplace shape: no child
+ *    process, no binary).
  *  - sidecar (legacy/dev): prepare data dir + token + agent-config.json,
  *    spawn the Go agent, wait for READY, register the llm-pi-ai provider
  *    route, schedule model refresh.
@@ -59,12 +67,12 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
     return { ready }
   }
 
-  // Health snapshot for adapter mode (the agent-mode healthz equivalent):
-  // written after every refresh round so field diagnostics do not depend on
-  // terminal access to the DSH process.
+  // Health snapshots for adapter mode (the agent-mode healthz equivalent):
+  // each upstream gets its own file so concurrent refreshes cannot overwrite
+  // one another.
   const dataDir = join(homedir(), '.kilo2dsh')
-  const statusPath = join(dataDir, 'adapter-status.json')
-  const writeStatus = (status: CatalogSnapshot, lastError: string): void => {
+  const writeStatus = (filename: string, status: CatalogSnapshot, lastError: string): void => {
+    const statusPath = join(dataDir, filename)
     void mkdir(dataDir, { recursive: true })
       .then(() =>
         writeFile(
@@ -77,7 +85,7 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
   }
 
   const upstreamApiKey = cfg.upstreamApiKeyEnv ? process.env[cfg.upstreamApiKeyEnv]?.trim() || undefined : undefined
-  const catalog = new ModelCatalog({
+  const kiloCatalog = new ModelCatalog({
     refreshSeconds: cfg.refreshSeconds,
     cachePath: defaultCachePath(dataDir),
     gatewayBaseUrl: cfg.gatewayBaseUrl,
@@ -85,43 +93,81 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
     anonymousKey: cfg.anonymousKey,
     requireTools: cfg.requireTools,
     onRefresh: (status, lastError) => {
-      writeStatus(status, lastError)
+      writeStatus('adapter-status.json', status, lastError)
       if (lastError) logger.warn(`kilo2dsh: catalog refresh issue: ${lastError}`)
     },
   })
-  const adapter = new KiloAdapter(catalog, {
+  const kiloAdapter = new KiloAdapter(kiloCatalog, {
     providerId: cfg.providerId,
     gatewayBaseUrl: cfg.gatewayBaseUrl,
     apiKey: upstreamApiKey,
     anonymousKey: cfg.anonymousKey,
   })
 
-  // Register immediately: the provider must appear in the selector right
-  // away, even while the catalog is still warming up (listModels is read
-  // live at selector time, so models appear as refreshes land).
-  ctx.llm.registerAdapter([cfg.providerId], adapter)
+  // Register immediately: providers must appear in the selector while their
+  // independent catalogs warm up in the background.
+  ctx.llm.registerAdapter([cfg.providerId], kiloAdapter)
   logger.info(`kilo2dsh: adapter registered for "${cfg.providerId}" (catalog warms up in background)`)
-  void catalog.start().catch((err) => {
+  void kiloCatalog.start().catch((err) => {
     logger.error(`kilo2dsh: catalog start failed: ${err instanceof Error ? err.message : String(err)}`)
   })
 
-  // A sidecar leftover (llm-pi-ai.providers.kilo2dsh pointing at a dead
-  // local port) would shadow the adapter registration and fail every dispatch
-  // with a connection error. Remove it before the route can be used.
+  const catalogs: ModelCatalog[] = [kiloCatalog]
+  const providerIds = [cfg.providerId]
+
+  if (cfg.zenEnabled) {
+    if (cfg.zenProviderId === cfg.providerId) {
+      logger.warn(`kilo2dsh: Zen provider id "${cfg.zenProviderId}" matches Kilo provider; Zen registration skipped`)
+    } else {
+      const zenApiKey = cfg.zenApiKeyEnv ? process.env[cfg.zenApiKeyEnv]?.trim() || undefined : undefined
+      const zenCatalog = new ZenModelCatalog({
+        refreshSeconds: cfg.refreshSeconds,
+        cachePath: defaultZenCachePath(dataDir),
+        zenBaseUrl: cfg.zenBaseUrl,
+        userAgent: cfg.zenUserAgent || undefined,
+        apiKey: zenApiKey,
+        anonymousKey: cfg.zenAnonymousKey,
+        requireTools: cfg.requireTools,
+        onRefresh: (status, lastError) => {
+          writeStatus('zen-adapter-status.json', status, lastError)
+          if (lastError) logger.warn(`kilo2dsh: OpenCode Zen catalog refresh issue: ${lastError}`)
+        },
+      })
+      const zenAdapter = new ZenAdapter(zenCatalog, {
+        providerId: cfg.zenProviderId,
+        zenBaseUrl: cfg.zenBaseUrl,
+        userAgent: cfg.zenUserAgent || undefined,
+        apiKey: zenApiKey,
+        anonymousKey: cfg.zenAnonymousKey,
+      })
+      ctx.llm.registerAdapter([cfg.zenProviderId], zenAdapter)
+      logger.info(`kilo2dsh: OpenCode Zen adapter registered for "${cfg.zenProviderId}" (catalog warms up in background)`)
+      void zenCatalog.start().catch((err) => {
+        logger.error(`kilo2dsh: OpenCode Zen catalog start failed: ${err instanceof Error ? err.message : String(err)}`)
+      })
+      catalogs.push(zenCatalog)
+      providerIds.push(cfg.zenProviderId)
+    }
+  }
+
+  // A sidecar leftover (llm-pi-ai.providers.<provider> pointing at a dead
+  // local port) would shadow an adapter registration and fail dispatch.
   if (ctx.settings) {
-    removeProviderRoute({ settings: ctx.settings }, cfg.providerId)
-      .then((removed) => {
-        if (removed) logger.info(`kilo2dsh: removed stale sidecar route for "${cfg.providerId}" from llm-pi-ai settings`)
-      })
-      .catch((err) => {
-        logger.warn(`kilo2dsh: stale route cleanup failed: ${err instanceof Error ? err.message : String(err)}`)
-      })
+    for (const providerId of providerIds) {
+      removeProviderRoute({ settings: ctx.settings }, providerId)
+        .then((removed) => {
+          if (removed) logger.info(`kilo2dsh: removed stale sidecar route for "${providerId}" from llm-pi-ai settings`)
+        })
+        .catch((err) => {
+          logger.warn(`kilo2dsh: stale route cleanup failed for "${providerId}": ${err instanceof Error ? err.message : String(err)}`)
+        })
+    }
   }
 
   const maybeEffect = (ctx as { effect?: PluginContext['effect'] }).effect
   if (typeof maybeEffect === 'function') {
     maybeEffect.call(ctx, () => () => {
-      catalog.stop()
+      for (const catalog of catalogs) catalog.stop()
     })
   }
   return { ready }
@@ -131,6 +177,9 @@ function applySidecar(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
   const cfg = resolveConfig(config)
   const paths = configPaths(join(homedir(), '.kilo2dsh'))
   const logger = ctx.logger
+  if (cfg.zenEnabled) {
+    logger.warn('kilo2dsh: zenEnabled applies only to native adapter mode; legacy sidecar remains Kilo-only')
+  }
 
   let agent: AgentProcess | null = null
   let refreshTimer: NodeJS.Timeout | null = null
@@ -296,13 +345,42 @@ export {
   KILO_API_BASE_URL,
   KILO_GATEWAY_BASE_URL,
   KILO_MODELS_URL,
+  OPENCODE_ZEN_ANONYMOUS_API_KEY,
+  OPENCODE_ZEN_BASE_URL,
+  OPENCODE_ZEN_GATEWAY_BASE_URL,
+  OPENCODE_ZEN_MODELS_URL,
   ZEN_BASE_URL,
   ModelCatalog,
+  ZenModelCatalog,
   fetchKiloModelCatalog,
   fetchKiloModels,
+  fetchZenCatalogAtUrl,
+  fetchZenModelCatalog,
+  fetchZenModels,
+  normalizeZenGatewayUrl,
+  normalizeZenModelsUrl,
   isFreeModel,
+  isZenFreeModel,
   staticFreeModels,
+  zenStaticFreeCandidates,
+  zenStaticFreeModels,
+  defaultCachePath,
+  defaultZenCachePath,
   type KiloModel,
   type KiloModelInfo,
+  type CatalogOptions,
+  type CatalogFetcher,
+  type CatalogSnapshot,
+  type FetchKiloModelsOptions,
+  type FetchZenModelsOptions,
 } from './adapter/catalog.ts'
 export { KiloAdapter, createKiloAdapter, PROVIDER_ID, type KiloAdapterOptions, type CatalogLike } from './adapter/kilo-adapter.ts'
+export {
+  ZenAdapter,
+  OpenCodeZenAdapter,
+  createZenAdapter,
+  ZEN_PROVIDER_ID,
+  ZEN_RESPONSES_MODEL_IDS,
+  zenModelApi,
+  type ZenAdapterOptions,
+} from './adapter/zen-adapter.ts'

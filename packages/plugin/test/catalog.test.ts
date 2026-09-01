@@ -9,10 +9,18 @@ import {
   decide,
   fetchKiloModelCatalog,
   fetchKiloModels,
+  fetchZenCatalogAtUrl,
+  fetchZenModels,
   isFreeModel,
+  isZenFreeModel,
   KILO_GATEWAY_BASE_URL,
+  OPENCODE_ZEN_BASE_URL,
+  OPENCODE_ZEN_GATEWAY_BASE_URL,
+  OPENCODE_ZEN_ANONYMOUS_API_KEY,
   ModelCatalog,
+  ZenModelCatalog,
   staticFreeModels,
+  zenStaticFreeModels,
 } from '../src/adapter/catalog.ts'
 
 function price(input?: number, output?: number, deprecated = false, free?: boolean) {
@@ -26,10 +34,23 @@ test('Kilo free detection prefers explicit flags and handles virtual/suffix rout
   assert.ok(isFreeModel('provider-model-free'))
   assert.ok(isFreeModel({ id: 'paid-looking-free', isFree: true }))
   assert.ok(isFreeModel({ id: 'legacy-free', is_free: true }))
+  assert.ok(isFreeModel({ id: 'string-true-free', isFree: 'true' }))
   assert.ok(!isFreeModel({ id: 'paid-free', isFree: false }))
+  assert.ok(!isFreeModel({ id: 'string-false-free', isFree: 'false' }))
   assert.ok(!isFreeModel({ id: 'qwen3-max', isFree: false }))
   assert.equal(isFreeModel({ id: 'camel-wins:free', isFree: false, is_free: true }), false)
   assert.equal(isFreeModel('provider/free'), false)
+})
+
+test('Zen free detection accepts documented names but rejects paid records', () => {
+  assert.ok(isZenFreeModel('big-pickle'))
+  assert.ok(isZenFreeModel('mimo-v2.5-free'))
+  assert.ok(isZenFreeModel('provider/model:free'))
+  assert.ok(isZenFreeModel({ id: 'future-free', isFree: true }))
+  assert.ok(!isZenFreeModel({ id: 'future-false-free', isFree: 'false' }))
+  assert.ok(!isZenFreeModel({ id: 'looks-free', isFree: false }))
+  assert.ok(!isZenFreeModel('claude-sonnet-4'))
+  assert.ok(!isZenFreeModel({ id: 'big-pickle', deprecated: true }))
 })
 
 test('decodeKiloModels validates records and deduplicates IDs', () => {
@@ -99,6 +120,31 @@ test('fetchKiloModelCatalog sends Authorization only for an explicit token', asy
   const capture: { url?: string; init?: RequestInit } = {}
   await fetchKiloModelCatalog(`${KILO_GATEWAY_BASE_URL}/models`, fakeFetch({ [`${KILO_GATEWAY_BASE_URL}/models`]: kiloBody }, capture), { apiKey: 'account-token' })
   assert.equal(new Headers(capture.init?.headers).get('authorization'), 'Bearer account-token')
+})
+
+test('fetchZenModels normalizes the /v1 endpoint and sends the public lane headers', async () => {
+  const capture: { url?: string; init?: RequestInit } = {}
+  const body = { data: [{ id: 'big-pickle' }, { id: 'paid-model' }] }
+  const ids = await fetchZenModels(
+    OPENCODE_ZEN_BASE_URL,
+    fakeFetch({ [`${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`]: body }, capture),
+  )
+  assert.deepEqual(ids, ['big-pickle', 'paid-model'])
+  assert.equal(capture.url, `${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`)
+  const headers = new Headers(capture.init?.headers)
+  assert.equal(headers.get('authorization'), `Bearer ${OPENCODE_ZEN_ANONYMOUS_API_KEY}`)
+  assert.equal(headers.get('x-opencode-client'), 'cli')
+  assert.match(headers.get('user-agent') ?? '', /^opencode\//)
+})
+
+test('fetchZenCatalogAtUrl preserves an explicitly empty anonymous key', async () => {
+  const capture: { init?: RequestInit } = {}
+  await fetchZenCatalogAtUrl(
+    `${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`,
+    fakeFetch({ [`${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`]: { data: [{ id: 'big-pickle' }] } }, capture),
+    { anonymousKey: '' },
+  )
+  assert.equal(new Headers(capture.init?.headers).get('authorization'), null)
 })
 
 test('start() retries Kilo catalog discovery while the live list is unavailable', async () => {
@@ -177,4 +223,45 @@ test('ModelCatalog restores a fresh Kilo cache when discovery is unavailable', a
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('ZenModelCatalog filters the live OpenCode directory independently of Kilo', async () => {
+  const body = {
+    data: [
+      { id: 'big-pickle' },
+      { id: 'mimo-v2.5-free' },
+      { id: 'deepseek-v4-flash-free' },
+      { id: 'paid-model' },
+      { id: 'future-free', isFree: false },
+    ],
+  }
+  const capture: { url?: string; init?: RequestInit } = {}
+  const catalog = new ZenModelCatalog({
+    fetchImpl: fakeFetch({ [`${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`]: body }, capture),
+    refreshSeconds: 3600,
+  })
+  await catalog.refreshOnce()
+  try {
+    assert.equal(catalog.modelsUrl, `${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`)
+    assert.deepEqual(catalog.list(), ['big-pickle', 'deepseek-v4-flash-free', 'mimo-v2.5-free'])
+    assert.equal(catalog.decision('paid-model').allowed, false)
+    assert.equal(catalog.decision('future-free').allowed, false)
+    assert.equal(new Headers(capture.init?.headers).get('x-opencode-client'), 'cli')
+    assert.equal(new Headers(capture.init?.headers).get('authorization'), 'Bearer public')
+  } finally {
+    catalog.stop()
+  }
+})
+
+test('ZenModelCatalog falls back to its own static free list while offline', async () => {
+  const fail = (async () => {
+    throw new Error('Zen unavailable')
+  }) as typeof fetch
+  const catalog = new ZenModelCatalog({ fetchImpl: fail, startupRetryMs: 0 })
+  await catalog.refreshOnce()
+  assert.deepEqual(catalog.list(), zenStaticFreeModels)
+  assert.equal(catalog.decision('big-pickle').allowed, true)
+  assert.equal(catalog.decision('deepseek-v4-flash-free').allowed, true)
+  assert.equal(catalog.snapshot().status, 'error')
+  catalog.stop()
 })

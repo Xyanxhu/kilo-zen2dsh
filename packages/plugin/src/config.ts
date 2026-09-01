@@ -41,6 +41,18 @@ export interface Kilo2dshConfig {
   restartMaxDelayMs?: number
   /** Consecutive crash count that trips the circuit breaker. */
   maxConsecutiveCrashes?: number
+  /** Enable the independent OpenCode Zen free provider alongside Kilo. */
+  zenEnabled?: boolean
+  /** DSH provider route name for OpenCode Zen. */
+  zenProviderId?: string
+  /** OpenCode Zen root URL, normally `https://opencode.ai/zen`. */
+  zenBaseUrl?: string
+  /** Optional Zen compatibility User-Agent; empty derives the current OpenCode format. */
+  zenUserAgent?: string
+  /** Explicit Zen account-token environment variable; empty keeps public lane. */
+  zenApiKeyEnv?: string
+  /** Zen's public free-lane placeholder, normally `public`. */
+  zenAnonymousKey?: string
 }
 
 /** @deprecated Use Kilo2dshConfig. */
@@ -59,6 +71,12 @@ export const defaults = {
   restartDelayMs: 1000,
   restartMaxDelayMs: 60000,
   maxConsecutiveCrashes: 5,
+  zenEnabled: true,
+  zenProviderId: 'opencode2dsh',
+  zenBaseUrl: 'https://opencode.ai/zen',
+  zenUserAgent: '',
+  zenApiKeyEnv: '',
+  zenAnonymousKey: 'public',
 }
 
 export type ResolvedConfig = Required<
@@ -74,6 +92,12 @@ export type ResolvedConfig = Required<
     | 'restartDelayMs'
     | 'restartMaxDelayMs'
     | 'maxConsecutiveCrashes'
+    | 'zenEnabled'
+    | 'zenProviderId'
+    | 'zenBaseUrl'
+    | 'zenUserAgent'
+    | 'zenApiKeyEnv'
+    | 'zenAnonymousKey'
   >
 > & Kilo2dshConfig
 

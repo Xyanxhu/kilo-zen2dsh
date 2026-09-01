@@ -1,7 +1,7 @@
 {
   "name": "kilo2dsh",
   "private": true,
-  "description": "Free Kilo Gateway models for DeepSeek Harness (DSH): native dsh-llm adapter plugin, no API key.",
+  "description": "Free Kilo Gateway and OpenCode Zen models for DeepSeek Harness (DSH) via native dsh-llm adapters.",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

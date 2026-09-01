@@ -14,8 +14,8 @@ url: https://github.com/Xyanxhu/kilo2dsh
 name: Xyanxhu/kilo2dsh
 category: model
 description:
-  en: Exposes Kilo Gateway free models to DeepSeek Harness, with no API key.
-  zh: 将 Kilo Gateway 免费模型接入 DeepSeek Harness，无需 API Key。
+  en: Exposes Kilo Gateway and OpenCode Zen free models to DeepSeek Harness.
+  zh: 将 Kilo Gateway 与 OpenCode Zen 免费模型接入 DeepSeek Harness。
 ```
 
 Notes on the wording (their review rules):
@@ -70,13 +70,13 @@ Add Xyanxhu/kilo2dsh (model)
 ```markdown
 Adds one entry: `data/plugins/Xyanxhu__kilo2dsh.yml`.
 
-**What it does** — registers a native DSH `LlmAdapter` that streams from
-Kilo Gateway's keyless free endpoint. Discovery uses `GET /api/gateway/models`
-without an Authorization header; completions use
-`POST /api/gateway/chat/completions` and expose only Kilo records marked free
-(including `kilo-auto/free` and `:free` compatibility routes). The plugin
-auto-refreshes the catalog, falls back to a disk cache/static bootstrap list,
-and writes a health snapshot to `~/.kilo2dsh/adapter-status.json`.
+**What it does** — registers native DSH `LlmAdapter`s for Kilo Gateway and
+OpenCode Zen. Kilo discovery uses `GET /api/gateway/models` without an
+Authorization header and completions use `POST /api/gateway/chat/completions`.
+Zen keeps a separate `/zen/v1/models` catalog and routes its free models to
+Chat Completions or Responses as documented. Each catalog refreshes
+independently and has its own disk cache/health snapshot; Zen can be disabled
+with `zenEnabled: false`.
 
 **Install source** — published to npm as
 [`@kilo2dsh/dsh-plugin`](https://www.npmjs.com/package/@kilo2dsh/dsh-plugin);
