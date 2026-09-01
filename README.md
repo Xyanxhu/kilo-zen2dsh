@@ -135,6 +135,26 @@ The model filter is deliberately conservative:
 3. Image-output models and models without advertised tool support are hidden
    by default.
 
+### Automatic context and output-limit reconciliation
+
+Kilo model-directory records are not always internally consistent: a limit may
+be present on the top-level record, `top_provider`, or a nested `limit(s)`
+object, and compatible gateways use several spellings. The adapter merges
+those declarations and uses the smallest positive context limit. It keeps the
+advertised context window for prompt history, while calculating a separate
+safe output budget.
+
+The current gateway catalog advertises `minimax/minimax-m3:free` with a
+943,718-token completion limit, but the backend rejects requests above
+524,288. The adapter therefore applies a 524,288-token gateway compatibility
+ceiling (or the smaller model-specific limit) to `defaultMaxTokens` and to
+both `max_tokens` and `max_completion_tokens` immediately before the wire
+request. An oversized default supplied by DSH is consequently reduced
+automatically; callers do not need to edit their model configuration. This
+keeps a 1M-token context declaration available for input while preventing the
+400 error shown by MiniMax-M3. The compatibility ceiling is Kilo-specific;
+OpenCode Zen keeps the limits reported by its own catalog.
+
 For Zen, the public model directory currently contains minimal OpenAI records,
 so the adapter accepts the documented `big-pickle` exception and IDs ending in
 `-free`/`:free`, while treating an explicit future `isFree`/`is_free` flag as

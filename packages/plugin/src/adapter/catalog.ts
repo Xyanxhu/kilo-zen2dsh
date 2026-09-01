@@ -85,11 +85,32 @@ export interface KiloModel {
   id: string
   name?: string
   description?: string
-  context_length?: number | null
-  max_completion_tokens?: number | null
+  context_length?: number | string | null
+  /** OpenAI/DSH spelling used by a few compatible model directories. */
+  contextWindow?: number | string | null
+  context_window?: number | string | null
+  max_context_tokens?: number | string | null
+  max_completion_tokens?: number | string | null
+  /** OpenAI/DSH spellings used by compatible model directories. */
+  maxTokens?: number | string | null
+  max_tokens?: number | string | null
+  max_output_tokens?: number | string | null
   pricing?: KiloPricing | null
   architecture?: KiloArchitecture | null
-  top_provider?: { max_completion_tokens?: number | null } | null
+  top_provider?: {
+    context_length?: number | string | null
+    contextWindow?: number | string | null
+    context_window?: number | string | null
+    max_completion_tokens?: number | string | null
+    maxTokens?: number | string | null
+    max_tokens?: number | string | null
+    max_output_tokens?: number | string | null
+    [key: string]: unknown
+  } | null
+  /** Optional provider-directory limit objects. */
+  limit?: Record<string, unknown> | null
+  limits?: Record<string, unknown> | null
+  per_request_limits?: Record<string, unknown> | null
   supported_parameters?: string[] | null
   isFree?: boolean
   /** Older gateway deployments used snake_case for the same flag. */
@@ -134,6 +155,19 @@ export interface ModelPrice {
 const DEFAULT_CONTEXT_WINDOW = 262144
 const DEFAULT_MAX_TOKENS = 32768
 
+/**
+ * The Kilo gateway currently rejects completion requests above 524288 tokens
+ * even when an upstream catalog record advertises a larger value (MiniMax-M3
+ * currently reports 943718). Keep this as a gateway compatibility ceiling;
+ * model-specific limits below it still win.
+ */
+export const KILO_GATEWAY_MAX_OUTPUT_TOKENS = 524_288
+
+export interface ModelInfoOptions {
+  /** Gateway-specific output ceiling; null disables the compatibility cap. */
+  gatewayMaxOutputTokens?: number | null
+}
+
 function optionalTrim(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
@@ -146,6 +180,17 @@ function asFiniteNumber(value: unknown): number | undefined {
     return Number.isFinite(parsed) ? parsed : undefined
   }
   return undefined
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = asFiniteNumber(value)
+  if (parsed === undefined || parsed <= 0) return undefined
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(parsed)))
+}
+
+function normalizedGatewayMaxOutputTokens(value: number | null | undefined): number | null {
+  if (value === null) return null
+  return positiveInteger(value) ?? KILO_GATEWAY_MAX_OUTPUT_TOKENS
 }
 
 /** Accept the boolean spellings used by JSON gateways without guessing unknown values. */
@@ -345,12 +390,47 @@ function metadataDeprecated(model: Record<string, unknown>): boolean {
   return status === 'deprecated' || status === 'retired' || status === 'disabled' || model.deprecated_at != null || model.retirement_date != null
 }
 
-export function modelInfo(model: KiloModel): KiloModelInfo {
-  const rawContextWindow = asFiniteNumber(model.context_length)
-  const contextWindow = rawContextWindow !== undefined && rawContextWindow > 0 ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(rawContextWindow))) : DEFAULT_CONTEXT_WINDOW
-  const advertisedMax = model.top_provider?.max_completion_tokens ?? model.max_completion_tokens
-  const rawMaxTokens = asFiniteNumber(advertisedMax)
-  const maxTokens = rawMaxTokens !== undefined && rawMaxTokens > 0 ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(rawMaxTokens))) : Math.min(DEFAULT_MAX_TOKENS, contextWindow)
+export function modelInfo(model: KiloModel, options: ModelInfoOptions = {}): KiloModelInfo {
+  const modelRecord = model as unknown as Record<string, unknown>
+  const records: Record<string, unknown>[] = [modelRecord]
+  for (const candidate of [model.top_provider, model.limit, model.limits, model.per_request_limits]) {
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+      records.push(candidate as Record<string, unknown>)
+    }
+  }
+
+  // Directory implementations disagree on whether limits live on the model,
+  // top_provider, or a nested `limit(s)` object.  Taking the smallest positive
+  // declaration is conservative and handles providers that report a smaller
+  // effective context than their marketing-level model record.
+  const positiveLimits = (keys: readonly string[]): number[] => {
+    const values: number[] = []
+    for (const record of records) {
+      for (const key of keys) {
+        const limit = positiveInteger(record[key])
+        if (limit !== undefined) values.push(limit)
+      }
+    }
+    return values
+  }
+
+  const contextLimits = positiveLimits(['context_length', 'contextWindow', 'context_window', 'max_context_tokens', 'context'])
+  const contextWindow = contextLimits.length > 0 ? Math.min(...contextLimits) : DEFAULT_CONTEXT_WINDOW
+  const outputLimits = positiveLimits([
+    'max_completion_tokens',
+    'maxTokens',
+    'max_tokens',
+    'max_output_tokens',
+    'output_tokens',
+    'output',
+  ])
+  const advertisedMax = outputLimits.length > 0 ? Math.min(...outputLimits) : DEFAULT_MAX_TOKENS
+  // The output budget can never exceed either the combined context or the
+  // selected gateway's compatibility ceiling. This is also what DSH uses as
+  // `defaultMaxTokens`, so an agent-loop default cannot reintroduce an unsafe
+  // value after resolution.
+  const gatewayMax = normalizedGatewayMaxOutputTokens(options.gatewayMaxOutputTokens) ?? Number.MAX_SAFE_INTEGER
+  const maxTokens = Math.min(advertisedMax, contextWindow, gatewayMax)
   const inputModalities = Array.isArray(model.architecture?.input_modalities)
     ? model.architecture!.input_modalities!.map(String).filter(Boolean)
     : ['text']
@@ -404,6 +484,8 @@ export interface CatalogOptions {
   extraHeaders?: Record<string, string>
   /** Require an explicit `tools` capability for exposed agent models. */
   requireTools?: boolean
+  /** Gateway-specific output ceiling; null disables the Kilo compatibility cap. */
+  gatewayMaxOutputTokens?: number | null
   fetchImpl?: typeof fetch
   now?: () => number
   onRefresh?: (status: CatalogSnapshot, lastError: string) => void
@@ -447,6 +529,7 @@ export class ModelCatalog {
   #fetchCatalog: CatalogFetcher
   #catalogLabel: string
   #requireTools: boolean
+  #gatewayMaxOutputTokens: number | null
   #fetch: typeof fetch
   #now: () => number
   #timer: NodeJS.Timeout | null = null
@@ -473,6 +556,7 @@ export class ModelCatalog {
     this.#fetchCatalog = options.fetchCatalog ?? fetchKiloModelCatalog
     this.#catalogLabel = options.catalogLabel?.trim() || 'Kilo'
     this.#requireTools = options.requireTools ?? true
+    this.#gatewayMaxOutputTokens = normalizedGatewayMaxOutputTokens(options.gatewayMaxOutputTokens)
     this.#fetch = options.fetchImpl ?? fetch
     this.#now = options.now ?? Date.now
     this.#onRefresh = options.onRefresh
@@ -578,7 +662,8 @@ export class ModelCatalog {
     const details: KiloModelInfo[] = []
     for (const id of this.list()) {
       const model = this.#models.get(id)
-      details.push(model ? modelInfo(model) : modelInfo({ id, name: id }))
+      const options = { gatewayMaxOutputTokens: this.#gatewayMaxOutputTokens }
+      details.push(model ? modelInfo(model, options) : modelInfo({ id, name: id }, options))
     }
     return details
   }
@@ -627,6 +712,7 @@ export class ZenModelCatalog extends ModelCatalog {
       extraHeaders: { 'x-opencode-client': 'cli', ...(options.extraHeaders ?? {}) },
       fetchCatalog: options.fetchCatalog ?? fetchZenCatalogAtUrl,
       catalogLabel: options.catalogLabel ?? 'OpenCode Zen',
+      gatewayMaxOutputTokens: options.gatewayMaxOutputTokens ?? null,
     })
   }
 }

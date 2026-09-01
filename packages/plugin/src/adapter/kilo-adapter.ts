@@ -5,6 +5,7 @@ import * as openaiResponses from '@earendil-works/pi-ai/api/openai-responses'
 import {
   ANONYMOUS_API_KEY,
   KILO_GATEWAY_BASE_URL,
+  KILO_GATEWAY_MAX_OUTPUT_TOKENS,
   ModelCatalog,
   modelInfo,
   type KiloModel,
@@ -56,6 +57,8 @@ export interface KiloAdapterOptions {
   headerBuilder?: (ids: RequestIDs, options: KiloAdapterOptions, mode?: unknown) => Record<string, string>
   /** Select the OpenAI-compatible API for a model (Kilo defaults to chat completions). */
   apiResolver?: (model: KiloModel) => Api
+  /** Gateway output ceiling; null disables the Kilo compatibility cap. */
+  maxOutputTokens?: number | null
 }
 
 function numeric(value: unknown, fallback: number): number {
@@ -65,6 +68,48 @@ function numeric(value: unknown, fallback: number): number {
     if (Number.isFinite(parsed) && parsed > 0) return parsed
   }
   return fallback
+}
+
+/** Return a positive finite integer without allowing an unsafe request value. */
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() !== ''
+      ? Number(value)
+      : undefined
+  if (parsed === undefined || !Number.isFinite(parsed) || parsed <= 0) return undefined
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(parsed)))
+}
+
+/**
+ * DSH materializes `defaultMaxTokens` before calling an adapter, so an
+ * explicit value can still be larger than the model metadata seen by this
+ * class. Clamp both paths at the final wire boundary.
+ */
+export function clampMaxTokens(value: unknown, modelMaxTokens: number): number | undefined {
+  const requested = positiveInteger(value)
+  if (requested === undefined) return undefined
+  const cap = positiveInteger(modelMaxTokens)
+  return cap === undefined ? requested : Math.min(requested, cap)
+}
+
+/**
+ * Last-resort payload guard for future pi-ai versions or custom callers that
+ * bypass the normal option path. It preserves the selected field spelling and
+ * only changes a value when it exceeds the resolved model cap.
+ */
+function clampPayloadMaxTokens(payload: unknown, modelMaxTokens: number): unknown {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload
+  const record = payload as Record<string, unknown>
+  let next: Record<string, unknown> | undefined
+  for (const field of ['max_tokens', 'max_completion_tokens']) {
+    const value = positiveInteger(record[field])
+    if (value !== undefined && value > modelMaxTokens) {
+      next ??= { ...record }
+      next[field] = modelMaxTokens
+    }
+  }
+  return next ?? payload
 }
 
 function thinkingLevel(value: unknown): ThinkingLevel | undefined {
@@ -80,8 +125,9 @@ function modelToPiModel(
   gatewayBaseUrl: string,
   headers: Record<string, string>,
   api: Api = 'openai-completions',
+  gatewayMaxOutputTokens: number | null = KILO_GATEWAY_MAX_OUTPUT_TOKENS,
 ): Model<Api> {
-  const info = modelInfo(model)
+  const info = modelInfo(model, { gatewayMaxOutputTokens })
   const pricing = model.pricing ?? {}
   const zero = 0
   const input = numeric(pricing.prompt ?? pricing.input, zero)
@@ -173,6 +219,7 @@ export class KiloAdapter {
   readonly #providerName: string
   readonly #options: KiloAdapterOptions
   readonly #apiResolver: (model: KiloModel) => Api
+  readonly #maxOutputTokens: number | null
 
   constructor(catalog: CatalogLike, options: KiloAdapterOptions = {}) {
     this.#catalog = catalog
@@ -184,6 +231,12 @@ export class KiloAdapter {
     this.#providerName = options.displayName?.trim() || 'Kilo Gateway (free)'
     this.#options = options
     this.#apiResolver = options.apiResolver ?? (() => 'openai-completions')
+    this.#maxOutputTokens = options.maxOutputTokens === null
+      ? null
+      : (() => {
+          const parsed = numeric(options.maxOutputTokens, KILO_GATEWAY_MAX_OUTPUT_TOKENS)
+          return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(parsed)))
+        })()
     this.#provider = createProvider<Api>({
       id: this.#providerId,
       name: this.#providerName,
@@ -221,7 +274,9 @@ export class KiloAdapter {
       if (seen.has(id)) continue
       seen.add(id)
       const detail = this.#catalog.get?.(id)
-      const info = detail ? modelInfo(detail) : { id, name: id, inputModalities: ['text'] }
+      const info = detail
+        ? modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens })
+        : { id, name: id, inputModalities: ['text'] }
       models.push({ provider, id, name: info.name, inputModalities: ['text'] })
     }
     return models
@@ -236,7 +291,17 @@ export class KiloAdapter {
     defaultMaxTokens: number
   } {
     const detail = this.#catalog.get?.(model)
-    const info = detail ? modelInfo(detail) : { id: model, name: model, contextWindow: DEFAULT_CONTEXT_WINDOW, maxTokens: DEFAULT_MAX_TOKENS }
+    const info = detail
+      ? modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens })
+      : modelInfo(
+          {
+            id: model,
+            name: model,
+            context_length: DEFAULT_CONTEXT_WINDOW,
+            max_completion_tokens: DEFAULT_MAX_TOKENS,
+          },
+          { gatewayMaxOutputTokens: this.#maxOutputTokens },
+        )
     return {
       provider,
       id: model,
@@ -265,6 +330,7 @@ export class KiloAdapter {
     const context = toPiContext(options)
     const ids = deriveRequestIDs(options.messages, this.#options.projectNamespace ?? 'kilo2dsh:default-project')
     const detail = this.#catalog.get?.(modelId) ?? fallbackModel(modelId)
+    const info = modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens })
     const baseHeaders = requestHeaders(ids, this.#options, options.mode)
     const headers: ProviderHeaders = { ...baseHeaders }
     if (!this.#apiKey) {
@@ -273,7 +339,14 @@ export class KiloAdapter {
       // the SDK-supported way to remove that generated header.
       headers.authorization = null
     }
-    const model = modelToPiModel(detail, this.#providerId, this.#gatewayBaseUrl, baseHeaders, this.#apiResolver(detail))
+    const model = modelToPiModel(
+      detail,
+      this.#providerId,
+      this.#gatewayBaseUrl,
+      baseHeaders,
+      this.#apiResolver(detail),
+      this.#maxOutputTokens,
+    )
     const events = this.#provider.streamSimple(model, context as unknown as Context, {
       apiKey: this.#transportApiKey,
       sessionId: ids.session,
@@ -281,8 +354,9 @@ export class KiloAdapter {
       signal: options.signal,
       maxRetries: 0,
       temperature: options.temperature,
-      maxTokens: options.maxTokens,
+      maxTokens: clampMaxTokens(options.maxTokens, info.maxTokens),
       reasoning: thinkingLevel(options.reasoningEffort),
+      onPayload: (payload) => clampPayloadMaxTokens(payload, info.maxTokens),
     })
     yield* toStreamChunks(events as unknown as AsyncIterable<PiEvent>, model.contextWindow)
   }

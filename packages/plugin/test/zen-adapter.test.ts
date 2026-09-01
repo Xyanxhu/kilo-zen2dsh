@@ -20,6 +20,16 @@ test('ZenAdapter keeps the OpenCode provider surface and defaults', () => {
   assert.equal(zenModelApi({ id: 'future-model', opencode: { endpoint: '/responses' } }), 'openai-responses')
 })
 
+test('ZenAdapter does not inherit Kilo gateway output ceiling', () => {
+  const model = 'large-zen-model'
+  const adapter = new ZenAdapter({
+    list: () => [model],
+    decision: () => ({ allowed: true, source: 'catalog_free', known: true }),
+    get: () => ({ id: model, context_length: 1_048_576, max_completion_tokens: 943_718 }),
+  })
+  assert.equal(adapter.resolveModel(ZEN_PROVIDER_ID, model).defaultMaxTokens, 943_718)
+})
+
 test('ZenAdapter streams through /zen/v1 with public auth and compatibility headers', async () => {
   let seenPath = ''
   let seenHeaders: Record<string, string | string[] | undefined> = {}

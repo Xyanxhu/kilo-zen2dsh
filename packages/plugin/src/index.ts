@@ -344,6 +344,7 @@ export {
   ANONYMOUS_API_KEY,
   KILO_API_BASE_URL,
   KILO_GATEWAY_BASE_URL,
+  KILO_GATEWAY_MAX_OUTPUT_TOKENS,
   KILO_MODELS_URL,
   OPENCODE_ZEN_ANONYMOUS_API_KEY,
   OPENCODE_ZEN_BASE_URL,
@@ -361,6 +362,7 @@ export {
   normalizeZenModelsUrl,
   isFreeModel,
   isZenFreeModel,
+  modelInfo,
   staticFreeModels,
   zenStaticFreeCandidates,
   zenStaticFreeModels,
@@ -368,13 +370,21 @@ export {
   defaultZenCachePath,
   type KiloModel,
   type KiloModelInfo,
+  type ModelInfoOptions,
   type CatalogOptions,
   type CatalogFetcher,
   type CatalogSnapshot,
   type FetchKiloModelsOptions,
   type FetchZenModelsOptions,
 } from './adapter/catalog.ts'
-export { KiloAdapter, createKiloAdapter, PROVIDER_ID, type KiloAdapterOptions, type CatalogLike } from './adapter/kilo-adapter.ts'
+export {
+  KiloAdapter,
+  clampMaxTokens,
+  createKiloAdapter,
+  PROVIDER_ID,
+  type KiloAdapterOptions,
+  type CatalogLike,
+} from './adapter/kilo-adapter.ts'
 export {
   ZenAdapter,
   OpenCodeZenAdapter,

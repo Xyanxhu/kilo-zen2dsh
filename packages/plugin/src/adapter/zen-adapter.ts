@@ -79,6 +79,9 @@ export class ZenAdapter extends KiloAdapter {
       displayName: options.displayName ?? 'OpenCode Zen (free)',
       authName: options.authName ?? 'OpenCode Zen API key (optional)',
       projectNamespace: options.projectNamespace ?? 'opencode2dsh:default-project',
+      // The 524,288-token ceiling is specific to the Kilo gateway's current
+      // MiniMax compatibility lane; Zen owns its own model limits.
+      maxOutputTokens: options.maxOutputTokens ?? null,
       apiResolver: options.apiResolver ?? zenModelApi,
       headerBuilder:
         options.headerBuilder ??

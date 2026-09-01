@@ -19,6 +19,8 @@ import {
   OPENCODE_ZEN_ANONYMOUS_API_KEY,
   ModelCatalog,
   ZenModelCatalog,
+  KILO_GATEWAY_MAX_OUTPUT_TOKENS,
+  modelInfo,
   staticFreeModels,
   zenStaticFreeModels,
 } from '../src/adapter/catalog.ts'
@@ -58,6 +60,42 @@ test('decodeKiloModels validates records and deduplicates IDs', () => {
   assert.deepEqual(models.map((model) => model.id), ['a'])
   assert.equal(models[0]?.name, 'a')
   assert.deepEqual(decodeKiloModels({ data: [] }), [])
+})
+
+test('modelInfo merges nested context metadata and caps an over-advertised output limit', () => {
+  const info = modelInfo({
+    id: 'minimax/minimax-m3:free',
+    context_length: 1_048_576,
+    top_provider: {
+      context_length: 1_048_576,
+      max_completion_tokens: 943_718,
+    },
+    isFree: true,
+  })
+  assert.equal(info.contextWindow, 1_048_576)
+  assert.equal(info.maxTokens, KILO_GATEWAY_MAX_OUTPUT_TOKENS)
+})
+
+test('modelInfo chooses the smallest declared context and supports compatible aliases', () => {
+  const info = modelInfo({
+    id: 'alias-model',
+    context_length: 1_000_000,
+    contextWindow: 800_000,
+    top_provider: { context_length: 524_288, maxTokens: 600_000 },
+    limits: { context: 700_000, output: 100_000 },
+  })
+  assert.equal(info.contextWindow, 524_288)
+  assert.equal(info.maxTokens, 100_000)
+})
+
+test('modelInfo can disable or override a gateway compatibility ceiling', () => {
+  const model = {
+    id: 'large-model',
+    context_length: 1_048_576,
+    max_completion_tokens: 943_718,
+  }
+  assert.equal(modelInfo(model, { gatewayMaxOutputTokens: 100_000 }).maxTokens, 100_000)
+  assert.equal(modelInfo(model, { gatewayMaxOutputTokens: null }).maxTokens, 943_718)
 })
 
 test('compatibility decoder accepts a Kilo response and preserves costs', () => {

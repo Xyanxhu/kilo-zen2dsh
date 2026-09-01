@@ -12,7 +12,9 @@
 - `ids.ts`：稳定 conversation/project ID、随机 request ID、Kilo 与 OpenCode
   两套请求头。
 - `kilo-adapter.ts`：通用 pi-ai OpenAI-compatible provider、Kilo keyless SDK
-  兼容和按模型 API 选择。
+  兼容、按模型 API 选择，以及最终请求的 max-token 保护。
+- `catalog.ts`：归一化多种上下文/输出限制字段；在目录误报时为 DSH 提供安全的
+  `defaultMaxTokens`。
 - `zen-adapter.ts`：Zen URL、`Bearer public`、OpenCode 兼容头，以及 Responses
   API 模型路由。
 - `messages.ts` / `events.ts`：DSH 与 pi-ai 消息/chunk 转换。
@@ -63,6 +65,8 @@ go build ./cmd/agent
 - Zen 当前部分部署对非 OpenCode User-Agent 返回 `429 FreeUsageLimitError`；项目
   记录该行为并提供 `zenEnabled` 开关，不把它当作认证绕过。
 - 不能把 `isFree: false` 的记录因名字含 `free` 放行。
+- 目录误报的输出上限不能直接传给上游；MiniMax-M3 等模型必须经过网关兼容上限
+  校正，并在最终 payload 再次检查。
 - 不轮换出口、不隐藏上游错误、不承诺免费模型的内容保留策略；调用前请阅读服务
   条款并避免发送敏感数据。
 

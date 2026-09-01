@@ -94,6 +94,16 @@ Zen 请求附带 `x-opencode-client: cli`、session/request/project 关联头和
 `x-opencode-*`。免费上游可能记录 prompt、输出和使用次数，调用方应遵守各服务
 条款并避免提交敏感数据。
 
+## 5.1 模型能力校正
+
+Kilo 的 live `/models` 元数据是动态的，且不同上游可能把上下文/输出限制放在
+顶层、`top_provider` 或 `limit(s)` 中。`modelInfo()` 将兼容字段归一化，取最小
+正数上下文限制；输出预算再与上下文窗口和当前网关兼容上限取最小值。对于
+MiniMax-M3 免费记录，目录曾报告 943,718 个输出 token，而实际后端上限为
+524,288，因此 Kilo 的 `resolveModel().defaultMaxTokens` 和最终 OpenAI payload 都
+会自动下调到安全值。输入上下文窗口仍按目录能力保留，不把输出兼容上限误当成
+输入窗口；Zen adapter 不继承这个 Kilo 专用上限。
+
 ## 6. 生命周期与缓存
 
 `index.ts` 在 adapter 模式下立即注册两个 provider，然后异步执行目录刷新。每个

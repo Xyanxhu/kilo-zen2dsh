@@ -74,6 +74,21 @@ Completions。未知未来模型默认走 Chat Completions，并可由目录记�
 ~/.kilo2dsh/zen-adapter-status.json
 ```
 
+### 上下文窗口与输出预算
+
+Kilo 目录的 `context_length`/`max_completion_tokens` 可能分别出现在顶层、
+`top_provider` 或兼容网关的 `limit(s)` 对象中。`modelInfo()` 支持这些别名，
+对每类限制取最小正整数；`contextWindow` 用于 DSH 的输入窗口，`maxTokens` 是
+独立的输出预算。
+
+DSH 会在 adapter 调用前把 `resolveModel().defaultMaxTokens` 物化到生成选项，
+所以 `KiloAdapter` 还在最终 payload 边界再次限制两个 OpenAI 字段。当前 Kilo
+目录中的 MiniMax-M3 免费记录曾报出 943,718 个输出 token，而后端只接受至多
+524,288；`KILO_GATEWAY_MAX_OUTPUT_TOKENS` 记录这个兼容上限。若模型目录声明更小
+的限制，则更小值优先；因此过大的 DSH 默认值会自动收敛，不会再触发该 400。
+`ZenModelCatalog`/`ZenAdapter` 将该 Kilo 专用上限设为关闭，继续尊重 Zen 自己的
+模型能力声明。
+
 ## 请求头和消息
 
 每个 provider 都从首个用户 turn 派生稳定 session/project ID，并生成随机 request
@@ -130,3 +145,6 @@ go test ./...
 - [OpenCode provider source](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/provider/provider.ts)
 - [OpenCode issue #42500: anonymous Zen User-Agent behavior](https://github.com/anomalyco/opencode/issues/42500)
 - [QwenPaw OpenAI provider](https://github.com/agentscope-ai/QwenPaw/blob/main/src/qwenpaw/providers/openai_provider.py)
+- [DSH `LlmAdapter` model limits](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm/README.md)
+- [DSH discussion: oversized default token limits](https://github.com/deepseek-ai/deepseek-harness/discussions/4498)
+- [Kilo custom-model context/output limits](https://github.com/Kilo-Org/kilocode/blob/main/packages/kilo-docs/pages/code-with-ai/agents/custom-models.md)
