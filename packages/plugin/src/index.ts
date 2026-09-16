@@ -12,6 +12,7 @@ import {
 } from './adapter/catalog.ts'
 import { KiloAdapter } from './adapter/kilo-adapter.ts'
 import { ZenAdapter } from './adapter/zen-adapter.ts'
+import type { AttachmentStore } from './adapter/messages.ts'
 import { AgentProcess, type ReadyInfo } from './agent-process.js'
 import { configPaths, ensureToken, resolveConfig, writeAgentConfig, type Kilo2dshConfig } from './config.js'
 import { fetchHealth, fetchModels, registerProvider, removeProviderRoute } from './provider.js'
@@ -44,6 +45,17 @@ interface PluginContext {
   }
   effect?(fn: () => () => void): unknown
 }
+
+/**
+ * The optional `modelMeta` host service dsh-model-meta-autofill provides. We
+ * only need the lookup here: the catalog's own description is authoritative
+ * when present (Kilo's gateway text is written for its model picker), and the
+ * models.dev catalog fills the rest.
+ */
+interface ModelMetaService {
+  lookup(id: string): { description?: string } | undefined
+}
+
 
 export const name = 'kilo2dsh'
 export const inject = ['llm', 'credentials', 'settings'] as const
@@ -84,6 +96,29 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
       .catch(() => {})
   }
 
+  // dsh-model-meta-autofill exposes its merged models.dev index as the
+  // optional `modelMeta` host service. The Kilo/Zen gateways are the
+  // authority for the models they expose, but Zen's listing carries no
+  // description at all and some Kilo records ship none — the catalog fills
+  // those gaps by id. The service degrades to "no fill" when absent, so this
+  // plugin never hard-depends on the other one being installed.
+  const modelMeta = readModelMeta(ctx)
+  const fillDescriptions = (catalog: ModelCatalog): void => {
+    if (modelMeta === undefined) return
+    let filled = 0
+    for (const id of catalog.list()) {
+      const detail = catalog.get(id)
+      if (detail === undefined) continue
+      if (typeof detail.description === 'string' && detail.description.trim() !== '') continue
+      const hit = modelMeta.lookup(id)
+      const description = hit?.description
+      if (typeof description !== 'string' || description.trim() === '') continue
+      detail.description = description.trim()
+      filled += 1
+    }
+    if (filled > 0) logger.info(`kilo2dsh: filled ${filled} model description(s) from the models.dev catalog`)
+  }
+
   const upstreamApiKey = cfg.upstreamApiKeyEnv ? process.env[cfg.upstreamApiKeyEnv]?.trim() || undefined : undefined
   const kiloCatalog = new ModelCatalog({
     refreshSeconds: cfg.refreshSeconds,
@@ -93,6 +128,7 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
     anonymousKey: cfg.anonymousKey,
     requireTools: cfg.requireTools,
     onRefresh: (status, lastError) => {
+      fillDescriptions(kiloCatalog)
       writeStatus('adapter-status.json', status, lastError)
       if (lastError) logger.warn(`kilo2dsh: catalog refresh issue: ${lastError}`)
     },
@@ -102,6 +138,7 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
     gatewayBaseUrl: cfg.gatewayBaseUrl,
     apiKey: upstreamApiKey,
     anonymousKey: cfg.anonymousKey,
+    attachments: attachmentsResolver(ctx),
   })
 
   // Register immediately: providers must appear in the selector while their
@@ -129,6 +166,7 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
         anonymousKey: cfg.zenAnonymousKey,
         requireTools: cfg.requireTools,
         onRefresh: (status, lastError) => {
+          fillDescriptions(zenCatalog)
           writeStatus('zen-adapter-status.json', status, lastError)
           if (lastError) logger.warn(`kilo2dsh: OpenCode Zen catalog refresh issue: ${lastError}`)
         },
@@ -139,6 +177,7 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
         userAgent: cfg.zenUserAgent || undefined,
         apiKey: zenApiKey,
         anonymousKey: cfg.zenAnonymousKey,
+        attachments: attachmentsResolver(ctx),
       })
       ctx.llm.registerAdapter([cfg.zenProviderId], zenAdapter)
       logger.info(`kilo2dsh: OpenCode Zen adapter registered for "${cfg.zenProviderId}" (catalog warms up in background)`)
@@ -170,7 +209,85 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
       for (const catalog of catalogs) catalog.stop()
     })
   }
+
+  // The modelMeta index itself loads asynchronously (bundled snapshot first,
+  // live models.dev merged over it), so the first catalog refresh can beat it
+  // and leave descriptions unfilled. Retry for a short window after boot;
+  // each retry is a no-op once every description is already in place, and the
+  // regular refresh interval keeps it current afterwards.
+  if (modelMeta !== undefined) {
+    let retries = 0
+    const retryFill = (): void => {
+      if (retries >= 6) return
+      retries += 1
+      let remaining = 0
+      for (const catalog of catalogs) {
+        for (const id of catalog.list()) {
+          const detail = catalog.get(id)
+          if (detail === undefined) continue
+          if (typeof detail.description !== 'string' || detail.description.trim() === '') remaining += 1
+        }
+      }
+      if (remaining === 0) return
+      for (const catalog of catalogs) fillDescriptions(catalog)
+      const timer = setTimeout(retryFill, 2_000)
+      timer.unref?.()
+    }
+    const kickTimer = setTimeout(retryFill, 2_000)
+    kickTimer.unref?.()
+    if (typeof maybeEffect === 'function') {
+      maybeEffect.call(ctx, () => () => {
+        clearTimeout(kickTimer)
+      })
+    }
+  }
+
   return { ready }
+}
+
+/**
+ * Resolve the optional durable attachment service per request. Vision input
+ * needs it: the harness stores image bytes out-of-band and hands adapters
+ * durable refs, and only the service can turn a ref into request bytes. It is
+ * read lazily because it registers later in the boot order than this plugin;
+ * a value captured at construction time would still be undefined on the first
+ * request. Absent on headless boots without one, where image blocks simply
+ * stay text placeholders.
+ */
+function attachmentsResolver(ctx: PluginContext): () => AttachmentStore | undefined {
+  return () => {
+    const get = (ctx as { get?: (name: string) => unknown }).get
+    if (typeof get !== 'function') return undefined
+    try {
+      const service = get.call(ctx as unknown, 'attachments')
+      if (service === undefined || service === null) return undefined
+      if (typeof (service as { readImageRequest?: unknown }).readImageRequest !== 'function') return undefined
+      return service as unknown as AttachmentStore
+    } catch {
+      return undefined
+    }
+  }
+}
+
+/**
+ * Read the optional `modelMeta` host service. dsh-model-meta-autofill
+ * provides it via `ctx.provide('modelMeta', service)`; its index loads
+ * asynchronously, so a lookup right after boot can miss until the bundled
+ * snapshot merges in — the catalog refresh loop re-runs this on every pass,
+ * which covers the gap without a hard dependency.
+ */
+function readModelMeta(ctx: PluginContext): ModelMetaService | undefined {
+  const get = (ctx as { get?: (name: string) => unknown }).get
+  if (typeof get !== 'function') return undefined
+  try {
+    const service = get.call(ctx as unknown, 'modelMeta')
+    if (service === undefined || service === null) return undefined
+    const lookup = (service as { lookup?: unknown }).lookup
+    if (typeof lookup !== 'function') return undefined
+    return { lookup: (id: string) => lookup.call(service as unknown, id) as { description?: string } | undefined }
+  } catch {
+    return undefined
+  }
 }
 
 function applySidecar(ctx: PluginContext, config: Kilo2dshConfig): { ready: Promise<ReadyInfo> } {
@@ -394,3 +511,4 @@ export {
   zenModelApi,
   type ZenAdapterOptions,
 } from './adapter/zen-adapter.ts'
+export { toPiContext, resolveRequestImages, type AttachmentStore, type ImageBytes } from './adapter/messages.ts'

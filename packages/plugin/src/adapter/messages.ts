@@ -38,7 +38,7 @@ export interface HarnessGenerateOptions {
 
 /** pi-ai message vocabulary (subset we emit). */
 export type PiMessage =
-  | { role: 'user'; content: string; timestamp: number }
+  | { role: 'user'; content: string | PiContentBlock[]; timestamp: number }
   | {
       role: 'assistant'
       content: PiAssistantBlock[]
@@ -146,11 +146,40 @@ function toolResultText(blocks: HarnessBlock[]): string {
 }
 
 /**
- * Convert the harness conversation into a pi-ai Context. Mirrors
- * textOnlyContext: text-only user content, tool results as toolResult
- * messages, assistant history as pi-ai assistant messages.
+ * Structural view of the durable attachment service (`ctx.get('attachments')`).
+ * Only the request-image read is used; the full host interface is wider.
  */
-export function toPiContext(options: HarnessGenerateOptions): PiContext {
+export interface AttachmentStore {
+  readImageRequest(
+    ref: ImageAttachmentRef,
+    policy?: ImageRequestPolicy,
+    signal?: AbortSignal,
+  ): Promise<{ data: Uint8Array; mediaType: string }>
+}
+interface ImageAttachmentRef {
+  attachmentId: string
+  mediaType?: string
+}
+interface ImageRequestPolicy {
+  maxPixels?: number
+  maxBytes?: number
+}
+
+/**
+ * Resolved request-image bytes, keyed by the durable attachment id: several
+ * occurrences of one image in a request share a single read.
+ */
+export type ImageBytes = Map<string, { data: string; mimeType: string }>
+
+/**
+ * Convert the harness conversation into a pi-ai Context. Mirrors
+ * textOnlyContext: user content keeps its image blocks (a vision-capable model
+ * receives them; dsh-llm already projected images to text for a text-only
+ * model before dispatch), tool results as toolResult messages, assistant
+ * history as pi-ai assistant messages. Pass `images` to inline resolved
+ * request bytes for vision models; without it every image block is dropped.
+ */
+export function toPiContext(options: HarnessGenerateOptions, images?: ImageBytes): PiContext {
   const providerId = options.provider
   const toolNames = new Map<string, string>()
   const messages: PiMessage[] = []
@@ -168,12 +197,12 @@ export function toPiContext(options: HarnessGenerateOptions): PiContext {
       messages.push(assistant)
       continue
     }
-    const text = flattenText(message)
+    const blocks = userBlocks(message.content, images)
     const results = message.content.filter((block) => block.type === 'tool-result') as Array<
       Extract<HarnessBlock, { type: 'tool-result' }>
     >
-    if (text.length > 0 || results.length === 0) {
-      messages.push({ role: 'user', content: text, timestamp: 0 })
+    if (blocks.length > 0 || results.length === 0) {
+      messages.push({ role: 'user', content: blocks, timestamp: 0 })
     }
     for (const result of results) {
       messages.push({
@@ -191,4 +220,73 @@ export function toPiContext(options: HarnessGenerateOptions): PiContext {
   const tools = options.tools?.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }))
   if (tools && tools.length > 0) context.tools = tools
   return context
+}
+
+/**
+ * Read every image occurrence in the request once, base64-encoded. Occurrences
+ * are keyed by attachment id, so one image reused across turns is decoded a
+ * single time. A missing service or a failed read leaves that image out: the
+ * turn still sends its text, and a text-only model is unaffected either way
+ * (dsh-llm already projected its images to placeholders before dispatch).
+ */
+export async function resolveRequestImages(
+  messages: HarnessMessage[],
+  attachments?: AttachmentStore,
+): Promise<ImageBytes | undefined> {
+  if (attachments === undefined) return undefined
+  const refs = new Map<string, ImageAttachmentRef>()
+  for (const message of messages) collectImageRefs(message.content, refs)
+  if (refs.size === 0) return undefined
+  const resolved: ImageBytes = new Map()
+  await Promise.all(
+    [...refs.values()].map(async (ref) => {
+      try {
+        const version = await attachments.readImageRequest(ref, { maxPixels: 1568, maxBytes: 8 * 1024 * 1024 })
+        const data = Buffer.from(version.data).toString('base64')
+        const mimeType =
+          typeof version.mediaType === 'string' && version.mediaType.length > 0
+            ? version.mediaType
+            : ref.mediaType ?? 'image/png'
+        resolved.set(ref.attachmentId, { data, mimeType })
+      } catch {
+        // One unreadable image must not fail the whole turn.
+      }
+    }),
+  )
+  return resolved.size === 0 ? undefined : resolved
+}
+
+function collectImageRefs(blocks: HarnessBlock[], refs: Map<string, ImageAttachmentRef>): void {
+  for (const block of blocks) {
+    if (block.type === 'image') {
+      const ref = (block as { attachment?: ImageAttachmentRef }).attachment
+      if (ref && typeof ref.attachmentId === 'string') refs.set(ref.attachmentId, ref)
+    } else if (block.type === 'tool-result') {
+      collectImageRefs(block.content, refs)
+    }
+  }
+}
+
+/**
+ * Build one pi-ai user message's content: a plain string when it carries no
+ * image block, otherwise an ordered part list. pi-ai's openai-completions
+ * serializer turns each image part into an inline `image_url` data URI, so a
+ * model that declares image input receives the bytes rather than a placeholder.
+ */
+function userBlocks(content: HarnessBlock[], images?: ImageBytes): string | PiContentBlock[] {
+  const parts: PiContentBlock[] = []
+  let hasImage = false
+  for (const block of content) {
+    if (block.type === 'text') {
+      if (block.text.length > 0) parts.push({ type: 'text', text: block.text })
+    } else if (block.type === 'image') {
+      const id = (block as { attachment?: { attachmentId?: string } }).attachment?.attachmentId
+      const hit = id === undefined ? undefined : images?.get(id)
+      if (hit) {
+        parts.push({ type: 'image', data: hit.data, mimeType: hit.mimeType })
+        hasImage = true
+      }
+    }
+  }
+  return hasImage ? parts : parts.map((part) => (part.type === 'text' ? part.text : '')).join('')
 }

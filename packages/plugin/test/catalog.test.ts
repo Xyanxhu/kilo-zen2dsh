@@ -76,6 +76,19 @@ test('modelInfo merges nested context metadata and caps an over-advertised outpu
   assert.equal(info.maxTokens, KILO_GATEWAY_MAX_OUTPUT_TOKENS)
 })
 
+test('modelInfo surfaces a catalog description and maps modalities to text/image', () => {
+  assert.equal(
+    modelInfo({ id: 'model-a', description: '  A capable model.  ' }).description,
+    'A capable model.',
+  )
+  assert.equal(modelInfo({ id: 'model-b', description: '' }).description, undefined)
+  assert.equal(modelInfo({ id: 'model-c' }).description, undefined)
+  // video/audio are real gateway modalities but pi-ai cannot express them
+  assert.deepEqual(modelInfo({ id: 'vl', architecture: { input_modalities: ['text', 'image'] } }).inputModalities, ['text', 'image'])
+  assert.deepEqual(modelInfo({ id: 'omni', architecture: { input_modalities: ['video', 'audio'] } }).inputModalities, ['text'])
+  assert.deepEqual(modelInfo({ id: 'none' }).inputModalities, ['text'])
+})
+
 test('modelInfo chooses the smallest declared context and supports compatible aliases', () => {
   const info = modelInfo({
     id: 'alias-model',

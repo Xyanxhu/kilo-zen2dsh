@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toPiContext, type HarnessGenerateOptions, type HarnessMessage, type PiMessage } from '../src/adapter/messages.ts'
+import { toPiContext, type HarnessGenerateOptions, type HarnessMessage, type PiContentBlock, type PiMessage } from '../src/adapter/messages.ts'
 
 function expectAssistant(message: PiMessage | undefined): Extract<PiMessage, { role: 'assistant' }> {
   assert.equal(message?.role, 'assistant')
@@ -132,4 +132,34 @@ test('tools pass through and empty tool lists are omitted', () => {
   assert.deepEqual(withTools.tools, [{ name: 'shell', description: 'run', parameters: { type: 'object' } }])
   const withoutTools = toPiContext(options())
   assert.equal(withoutTools.tools, undefined)
+})
+
+test('an image block inlines resolved bytes for a vision model', async () => {
+  const messages: HarnessMessage[] = [
+    { role: 'user', content: [
+      { type: 'text', text: 'describe' },
+      { type: 'image', attachment: { attachmentId: 'sha256:abc', mediaType: 'image/png' } },
+    ] },
+  ]
+  // Without resolved bytes the image is dropped and the turn stays text-only.
+  assert.equal(toPiContext(options({ messages })).messages[0]!.content, 'describe')
+  const images = new Map([['sha256:abc', { data: 'UE5HREFUQQ==', mimeType: 'image/png' }]])
+  assert.deepEqual(
+    toPiContext(options({ messages }), images).messages[0]!.content,
+    [
+      { type: 'text', text: 'describe' },
+      { type: 'image', data: 'UE5HREFUQQ==', mimeType: 'image/png' },
+    ],
+  )
+  // A second occurrence of the same attachment id reuses one resolved entry.
+  const two: HarnessMessage[] = [
+    ...messages,
+    { role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'sha256:abc', mediaType: 'image/png' } }] },
+  ]
+  const ctx = toPiContext(options({ messages: two }), images)
+  assert.deepEqual((ctx.messages[1]!.content as PiContentBlock[])[0], {
+    type: 'image',
+    data: 'UE5HREFUQQ==',
+    mimeType: 'image/png',
+  })
 })

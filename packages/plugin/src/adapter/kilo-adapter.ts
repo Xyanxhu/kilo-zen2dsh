@@ -12,7 +12,12 @@ import {
 } from './catalog.ts'
 import { toStreamChunks, type HarnessChunk, type PiEvent } from './events.ts'
 import { deriveRequestIDs, kiloHeaders, kiloUserAgent, type RequestIDs } from './ids.ts'
-import { toPiContext, type HarnessGenerateOptions } from './messages.ts'
+import {
+  toPiContext,
+  resolveRequestImages,
+  type AttachmentStore,
+  type HarnessGenerateOptions,
+} from './messages.ts'
 
 /** Provider id shown in the DSH model picker. */
 export const PROVIDER_ID = 'kilo2dsh'
@@ -59,6 +64,12 @@ export interface KiloAdapterOptions {
   apiResolver?: (model: KiloModel) => Api
   /** Gateway output ceiling; null disables the Kilo compatibility cap. */
   maxOutputTokens?: number | null
+  /**
+   * Durable attachment service; enables image input for vision models. Pass a
+   * function to resolve it lazily per request (the service registers after
+   * this plugin boots), or a plain object to bind it for the adapter's life.
+   */
+  attachments?: AttachmentStore | (() => AttachmentStore | undefined)
 }
 
 function numeric(value: unknown, fallback: number): number {
@@ -142,7 +153,9 @@ function modelToPiModel(
     // `/responses` based on the selected API.
     baseUrl: gatewayBaseUrl.replace(/\/+$/, ''),
     reasoning: info.reasoning,
-    input: ['text'],
+    // pi-ai gates inline image parts on `input` including "image"; keep it in
+    // sync with the modalities the gateway actually declares for this model.
+    input: info.inputModalities,
     cost: { input, output, cacheRead: 0, cacheWrite: 0 },
     contextWindow: info.contextWindow || DEFAULT_CONTEXT_WINDOW,
     maxTokens: info.maxTokens || DEFAULT_MAX_TOKENS,
@@ -220,6 +233,12 @@ export class KiloAdapter {
   readonly #options: KiloAdapterOptions
   readonly #apiResolver: (model: KiloModel) => Api
   readonly #maxOutputTokens: number | null
+  /**
+   * Resolved per request, not cached at construction: the attachment service
+   * registers later in the boot order than this plugin, so a value read once
+   * in the constructor would still be undefined when the first request lands.
+   */
+  readonly #resolveAttachments?: () => AttachmentStore | undefined
 
   constructor(catalog: CatalogLike, options: KiloAdapterOptions = {}) {
     this.#catalog = catalog
@@ -231,6 +250,12 @@ export class KiloAdapter {
     this.#providerName = options.displayName?.trim() || 'Kilo Gateway (free)'
     this.#options = options
     this.#apiResolver = options.apiResolver ?? (() => 'openai-completions')
+    this.#resolveAttachments =
+      typeof options.attachments === 'function'
+        ? (options.attachments as () => AttachmentStore | undefined)
+        : options.attachments === undefined
+          ? undefined
+          : () => options.attachments as AttachmentStore
     this.#maxOutputTokens = options.maxOutputTokens === null
       ? null
       : (() => {
@@ -267,17 +292,23 @@ export class KiloAdapter {
     return undefined
   }
 
-  listModels(provider: string): Array<{ provider: string; id: string; name: string; inputModalities: string[] }> {
+  listModels(provider: string): Array<{ provider: string; id: string; name: string; description?: string; inputModalities: string[] }> {
     const seen = new Set<string>()
-    const models: Array<{ provider: string; id: string; name: string; inputModalities: string[] }> = []
+    const models: Array<{ provider: string; id: string; name: string; description?: string; inputModalities: string[] }> = []
     for (const id of this.#catalog.list()) {
       if (seen.has(id)) continue
       seen.add(id)
       const detail = this.#catalog.get?.(id)
       const info = detail
         ? modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens })
-        : { id, name: id, inputModalities: ['text'] }
-      models.push({ provider, id, name: info.name, inputModalities: ['text'] })
+        : { id, name: id, description: undefined, inputModalities: ['text'] }
+      models.push({
+        provider,
+        id,
+        name: info.name,
+        ...(info.description === undefined ? {} : { description: info.description }),
+        inputModalities: info.inputModalities,
+      })
     }
     return models
   }
@@ -286,6 +317,7 @@ export class KiloAdapter {
     provider: string
     id: string
     name: string
+    description?: string
     inputModalities: string[]
     context: { contextWindow: number }
     defaultMaxTokens: number
@@ -306,7 +338,8 @@ export class KiloAdapter {
       provider,
       id: model,
       name: info.name,
-      inputModalities: ['text'],
+      ...(info.description === undefined ? {} : { description: info.description }),
+      inputModalities: info.inputModalities,
       context: { contextWindow: numeric(info.contextWindow, DEFAULT_CONTEXT_WINDOW) },
       defaultMaxTokens: numeric(info.maxTokens, DEFAULT_MAX_TOKENS),
     }
@@ -327,7 +360,8 @@ export class KiloAdapter {
       throw new Error(`${this.#providerId}: model "${modelId}" is not available in the configured free catalog (${decision.source})`)
     }
 
-    const context = toPiContext(options)
+    const images = await resolveRequestImages(options.messages, this.#resolveAttachments?.())
+    const context = toPiContext(options, images)
     const ids = deriveRequestIDs(options.messages, this.#options.projectNamespace ?? 'kilo2dsh:default-project')
     const detail = this.#catalog.get?.(modelId) ?? fallbackModel(modelId)
     const info = modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens })

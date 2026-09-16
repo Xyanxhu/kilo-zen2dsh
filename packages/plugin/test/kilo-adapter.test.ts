@@ -66,6 +66,36 @@ test('listModels mirrors the catalog without duplicates', () => {
   assert.deepEqual(models.map((m) => m.id), ['kilo-auto/free', 'stepfun/step-3.7-flash:free'])
 })
 
+test('listModels and resolveModel carry the catalog description and real modalities', () => {
+  const adapter = new KiloAdapter({
+    list: () => ['vl-free', 'plain-free'],
+    decision: () => ({ allowed: true, source: 'test', known: true }),
+    get: (id) =>
+      id === 'vl-free'
+        ? {
+            id,
+            name: 'VL Free',
+            description: 'Multimodal free model',
+            isFree: true,
+            architecture: { input_modalities: ['text', 'image', 'video'] },
+            supported_parameters: ['tools'],
+          }
+        : { id, name: 'Plain Free', isFree: true, supported_parameters: ['tools'] },
+  })
+  const listed = adapter.listModels('kilo2dsh')
+  const vl = listed.find((model) => model.id === 'vl-free')
+  assert.equal(vl?.description, 'Multimodal free model')
+  assert.deepEqual(vl?.inputModalities, ['text', 'image'])
+  const plain = listed.find((model) => model.id === 'plain-free')
+  assert.equal(plain?.description, undefined)
+  assert.deepEqual(plain?.inputModalities, ['text'])
+
+  const resolved = adapter.resolveModel('kilo2dsh', 'vl-free')
+  assert.equal(resolved.description, 'Multimodal free model')
+  assert.deepEqual(resolved.inputModalities, ['text', 'image'])
+  assert.equal(adapter.resolveModel('kilo2dsh', 'plain-free').description, undefined)
+})
+
 test('keyless free stream uses the Kilo endpoint and omits Authorization', async () => {
   let seenPath = ''
   let seenHeaders: Record<string, string | string[] | undefined> = {}

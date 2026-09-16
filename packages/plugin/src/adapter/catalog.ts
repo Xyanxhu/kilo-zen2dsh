@@ -130,6 +130,8 @@ export interface KiloModel {
 export interface KiloModelInfo {
   id: string
   name: string
+  /** One-line model description, when the catalog carries one. */
+  description?: string
   contextWindow: number
   maxTokens: number
   inputModalities: string[]
@@ -431,13 +433,20 @@ export function modelInfo(model: KiloModel, options: ModelInfoOptions = {}): Kil
   // value after resolution.
   const gatewayMax = normalizedGatewayMaxOutputTokens(options.gatewayMaxOutputTokens) ?? Number.MAX_SAFE_INTEGER
   const maxTokens = Math.min(advertisedMax, contextWindow, gatewayMax)
-  const inputModalities = Array.isArray(model.architecture?.input_modalities)
+  const declaredInput = Array.isArray(model.architecture?.input_modalities)
     ? model.architecture!.input_modalities!.map(String).filter(Boolean)
     : ['text']
-  if (!inputModalities.includes('text')) inputModalities.unshift('text')
+  if (!declaredInput.includes('text')) declaredInput.unshift('text')
+  const description =
+    typeof model.description === 'string' && model.description.trim() !== '' ? model.description.trim() : undefined
+  // DSH/pi-ai can only express text and image; a gateway that also lists
+  // video/audio still accepts both, so the extra modalities are dropped here.
+  const inputModalities = declaredInput.filter((modality) => modality === 'text' || modality === 'image')
+  if (inputModalities.length === 0) inputModalities.push('text')
   return {
     id: model.id,
     name: typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id,
+    ...(description === undefined ? {} : { description }),
     contextWindow,
     maxTokens,
     inputModalities,
