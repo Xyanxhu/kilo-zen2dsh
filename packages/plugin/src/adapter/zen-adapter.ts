@@ -2,6 +2,7 @@ import {
   OPENCODE_ZEN_ANONYMOUS_API_KEY,
   OPENCODE_ZEN_BASE_URL,
   OPENCODE_ZEN_GATEWAY_BASE_URL,
+  ZEN_VISION_MODEL_IDS,
   normalizeZenGatewayUrl,
 } from './catalog.ts'
 import {
@@ -127,6 +128,10 @@ export class ZenAdapter extends KiloAdapter {
       // The 524,288-token ceiling is specific to the Kilo gateway's current
       // MiniMax compatibility lane; Zen owns its own model limits.
       maxOutputTokens: options.maxOutputTokens ?? null,
+      // Zen's directory publishes no capability metadata, so vision-capable
+      // free models need the verified-id table to keep dsh-llm from
+      // projecting them text-only (and dropping image input).
+      visionOverrides: options.visionOverrides ?? ZEN_VISION_MODEL_IDS,
       apiResolver: options.apiResolver ?? zenModelApi,
       payloadDecorator: options.payloadDecorator ?? decorateZenPayload,
       headerBuilder:

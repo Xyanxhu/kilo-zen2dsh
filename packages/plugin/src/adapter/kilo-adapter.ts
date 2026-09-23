@@ -65,6 +65,11 @@ export interface KiloAdapterOptions {
   /** Gateway output ceiling; null disables the Kilo compatibility cap. */
   maxOutputTokens?: number | null
   /**
+   * Vision-capable model ids for gateways whose directory publishes no
+   * capability metadata (Zen); merged into modelInfo's modalities.
+   */
+  visionOverrides?: ReadonlySet<string>
+  /**
    * Durable attachment service; enables image input for vision models. Pass a
    * function to resolve it lazily per request (the service registers after
    * this plugin boots), or a plain object to bind it for the adapter's life.
@@ -144,8 +149,9 @@ function modelToPiModel(
   headers: Record<string, string>,
   api: Api = 'openai-completions',
   gatewayMaxOutputTokens: number | null = KILO_GATEWAY_MAX_OUTPUT_TOKENS,
+  visionOverrides?: ReadonlySet<string>,
 ): Model<Api> {
-  const info = modelInfo(model, { gatewayMaxOutputTokens })
+  const info = modelInfo(model, { gatewayMaxOutputTokens, visionOverrides })
   const pricing = model.pricing ?? {}
   const zero = 0
   const input = numeric(pricing.prompt ?? pricing.input, zero)
@@ -240,6 +246,8 @@ export class KiloAdapter {
   readonly #options: KiloAdapterOptions
   readonly #apiResolver: (model: KiloModel) => Api
   readonly #maxOutputTokens: number | null
+  /** Vision ids for metadata-less directories; undefined means no overrides. */
+  readonly #visionOverrides: ReadonlySet<string> | undefined
   /**
    * Resolved per request, not cached at construction: the attachment service
    * registers later in the boot order than this plugin, so a value read once
@@ -269,6 +277,7 @@ export class KiloAdapter {
           const parsed = numeric(options.maxOutputTokens, KILO_GATEWAY_MAX_OUTPUT_TOKENS)
           return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, Math.floor(parsed)))
         })()
+    this.#visionOverrides = options.visionOverrides
     this.#provider = createProvider<Api>({
       id: this.#providerId,
       name: this.#providerName,
@@ -307,8 +316,8 @@ export class KiloAdapter {
       seen.add(id)
       const detail = this.#catalog.get?.(id)
       const info = detail
-        ? modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens })
-        : { id, name: id, description: undefined, inputModalities: ['text'] }
+        ? modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens, visionOverrides: this.#visionOverrides })
+        : { id, name: id, description: undefined, inputModalities: this.#visionOverrides?.has(id) ? ['text', 'image'] : ['text'] }
       models.push({
         provider,
         id,
@@ -331,7 +340,7 @@ export class KiloAdapter {
   } {
     const detail = this.#catalog.get?.(model)
     const info = detail
-      ? modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens })
+      ? modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens, visionOverrides: this.#visionOverrides })
       : modelInfo(
           {
             id: model,
@@ -339,7 +348,7 @@ export class KiloAdapter {
             context_length: DEFAULT_CONTEXT_WINDOW,
             max_completion_tokens: DEFAULT_MAX_TOKENS,
           },
-          { gatewayMaxOutputTokens: this.#maxOutputTokens },
+          { gatewayMaxOutputTokens: this.#maxOutputTokens, visionOverrides: this.#visionOverrides },
         )
     return {
       provider,
@@ -371,7 +380,7 @@ export class KiloAdapter {
     const context = toPiContext(options, images)
     const ids = deriveRequestIDs(options.messages, this.#options.projectNamespace ?? 'kilo2dsh:default-project')
     const detail = this.#catalog.get?.(modelId) ?? fallbackModel(modelId)
-    const info = modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens })
+    const info = modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens, visionOverrides: this.#visionOverrides })
     const baseHeaders = requestHeaders(ids, this.#options, options.mode)
     const headers: ProviderHeaders = { ...baseHeaders }
     if (!this.#apiKey) {
@@ -387,6 +396,7 @@ export class KiloAdapter {
       baseHeaders,
       this.#apiResolver(detail),
       this.#maxOutputTokens,
+      this.#visionOverrides,
     )
     const events = this.#provider.streamSimple(model, context as unknown as Context, {
       apiKey: this.#transportApiKey,

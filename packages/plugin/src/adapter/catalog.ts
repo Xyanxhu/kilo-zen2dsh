@@ -65,6 +65,19 @@ export const zenStaticFreeModels: string[] = [
 /** Reserved for IDs observed in a live Zen catalog but not yet verified locally. */
 export const zenStaticFreeCandidates: string[] = ['deepseek-v4-flash-free', 'laguna-s-2.1-free']
 
+/**
+ * Zen free models verified to accept image input (asked to describe a 1x1
+ * red PNG and answered correctly through the anonymous lane). Zen's model
+ * directory publishes no capability metadata, so without this table
+ * dsh-llm projects these models text-only and strips pasted images before
+ * dispatch. Extend as more models are verified.
+ */
+export const ZEN_VISION_MODEL_IDS: ReadonlySet<string> = new Set([
+  'mimo-v2.6-flash-free',
+  'mimo-v2.5-free',
+  'space-bunny-free',
+])
+
 export interface KiloPricing {
   prompt?: string | number | null
   completion?: string | number | null
@@ -168,6 +181,14 @@ export const KILO_GATEWAY_MAX_OUTPUT_TOKENS = 524_288
 export interface ModelInfoOptions {
   /** Gateway-specific output ceiling; null disables the compatibility cap. */
   gatewayMaxOutputTokens?: number | null
+  /**
+   * Vision-capable model ids keyed exactly. Zen's public `/v1/models`
+   * records carry no capability metadata at all, so vision-capable free
+   * models would otherwise be projected text-only and dsh-llm would strip
+   * image input before dispatch. An override adds image to the declared
+   * modalities; it never removes one.
+   */
+  visionOverrides?: ReadonlySet<string>
 }
 
 function optionalTrim(value: string | undefined): string | undefined {
@@ -443,6 +464,7 @@ export function modelInfo(model: KiloModel, options: ModelInfoOptions = {}): Kil
   // video/audio still accepts both, so the extra modalities are dropped here.
   const inputModalities = declaredInput.filter((modality) => modality === 'text' || modality === 'image')
   if (inputModalities.length === 0) inputModalities.push('text')
+  if (options.visionOverrides?.has(model.id) && !inputModalities.includes('image')) inputModalities.push('image')
   return {
     id: model.id,
     name: typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id,
