@@ -44,6 +44,12 @@ POST https://opencode.ai/zen/v1/responses   (Responses-only model)
 IP、User-Agent 或账号策略拒绝请求，用户应把 Zen 视为 best-effort；显式配置
 `zenApiKeyEnv` 可改用自己的 Zen token。
 
+2026-09-16 起免费层还校验请求的 agent 会话形状（否则 403 FreeTierError）：
+`x-opencode-session` 必须是 `ses_` + 12 位 hex + 14 位 Base62 的官方格式
+（`canonicalZenSessionId()` 把稳定会话种子规整成该形状），请求体必须流式
+（pi-ai 默认如此）并含 `bash`/`edit`/`glob`/`grep`/`read` 五个工具名——
+`decorateZenPayload()` 在缺失时注入空壳定义。
+
 OpenCode 的公开目录目前是最小 OpenAI 记录，缺少统一的价格/免费字段。判定
 因此采用：
 

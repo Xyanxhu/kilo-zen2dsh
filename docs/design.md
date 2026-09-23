@@ -87,6 +87,16 @@ Zen 请求附带 `x-opencode-client: cli`、session/request/project 关联头和
 的 `opencode/<version>` User-Agent。该标记是当前网关的兼容要求，不是认证绕过；
 匿名资格、IP 配额、活动期限和账号要求仍由 Zen 服务端决定。
 
+2026-09-16 起，Zen 免费层还校验请求的「agent 会话形状」，缺失时一律
+403 FreeTierError：
+
+1. `x-opencode-session` 必须是官方格式 `ses_` + 12 位小写 hex + 14 位
+   Base62（适配器把稳定会话种子规整成该形状，会话亲和保持不变）；
+2. 请求体必须流式并携带五个核心 agent 工具名
+   `bash`/`edit`/`glob`/`grep`/`read`（仅校验名字）。pi-ai 本身强制流式；
+   纯聊天回合由 `payloadDecorator` 注入空壳工具定义，已带真实工具的请求
+   只补缺失的名字。
+
 ## 5. 关联头与隐私
 
 每轮对话由首个用户 turn 派生稳定的 SHA-256 session/project ID，每次请求使用
