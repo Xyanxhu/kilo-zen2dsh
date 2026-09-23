@@ -506,9 +506,11 @@ export {
   ZenAdapter,
   OpenCodeZenAdapter,
   createZenAdapter,
+  decorateZenPayload,
   ZEN_PROVIDER_ID,
   ZEN_RESPONSES_MODEL_IDS,
   zenModelApi,
   type ZenAdapterOptions,
 } from './adapter/zen-adapter.ts'
 export { toPiContext, resolveRequestImages, type AttachmentStore, type ImageBytes } from './adapter/messages.ts'
+export { canonicalZenSessionId, opencodeHeaders, opencodeUserAgent } from './adapter/ids.ts'
