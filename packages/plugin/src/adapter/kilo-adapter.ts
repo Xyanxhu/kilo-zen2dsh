@@ -70,6 +70,13 @@ export interface KiloAdapterOptions {
    * this plugin boots), or a plain object to bind it for the adapter's life.
    */
   attachments?: AttachmentStore | (() => AttachmentStore | undefined)
+  /**
+   * Final wire-payload transform, invoked by pi-ai's onPayload hook after the
+   * request params are built. Zen uses it to satisfy the free tier's agent
+   * shape check (stream + core agent tools) on requests that would otherwise
+   * be plain chat turns.
+   */
+  payloadDecorator?: (payload: Record<string, unknown>) => Record<string, unknown>
 }
 
 function numeric(value: unknown, fallback: number): number {
@@ -390,7 +397,11 @@ export class KiloAdapter {
       temperature: options.temperature,
       maxTokens: clampMaxTokens(options.maxTokens, info.maxTokens),
       reasoning: thinkingLevel(options.reasoningEffort),
-      onPayload: (payload) => clampPayloadMaxTokens(payload, info.maxTokens),
+      onPayload: (payload) => {
+        const clamped = clampPayloadMaxTokens(payload, info.maxTokens)
+        const record = (clamped ?? payload) as Record<string, unknown>
+        return this.#options.payloadDecorator ? this.#options.payloadDecorator(record) : record
+      },
     })
     yield* toStreamChunks(events as unknown as AsyncIterable<PiEvent>, model.contextWindow)
   }

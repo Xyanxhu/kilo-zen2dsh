@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
+  canonicalZenSessionId,
   conversationSeed,
   deriveRequestIDs,
   kiloHeaders,
@@ -82,10 +83,22 @@ test('opencodeHeaders carries Zen compatibility identifiers independently', () =
   const headers = opencodeHeaders(ids)
   assert.equal(headers['user-agent'], opencodeUserAgent())
   assert.equal(headers['x-opencode-client'], 'cli')
-  assert.equal(headers['x-opencode-session'], ids.session)
-  assert.equal(headers['x-session-affinity'], ids.session)
-  assert.equal(headers['X-Session-Id'], ids.session)
+  // The free tier validates the canonical ses_ shape (12 hex + 14 Base62),
+  // so the header never carries the raw stableID spelling.
+  assert.match(String(headers['x-opencode-session']), /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+  assert.equal(headers['x-session-affinity'], headers['x-opencode-session'])
+  assert.equal(headers['X-Session-Id'], headers['x-opencode-session'])
   assert.equal(headers['x-opencode-request'], ids.request)
   assert.equal(headers['x-opencode-project'], ids.project)
   assert.equal(headers['x-kilocode-editorname'], undefined)
+})
+
+test('canonicalZenSessionId is canonical, deterministic, and preserves session affinity', () => {
+  const fromSeed = canonicalZenSessionId('some-stable-session-seed')
+  assert.match(fromSeed, /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+  assert.equal(canonicalZenSessionId('some-stable-session-seed'), fromSeed, 'same seed maps to one session')
+  assert.notEqual(canonicalZenSessionId('another-seed'), fromSeed)
+  // An already-canonical value passes through untouched (custom upstreams).
+  const canonical = canonicalZenSessionId(fromSeed)
+  assert.equal(canonical, fromSeed)
 })

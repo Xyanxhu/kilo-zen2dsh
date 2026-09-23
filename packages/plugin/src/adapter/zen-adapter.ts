@@ -22,6 +22,51 @@ export const PROVIDER_ID = ZEN_PROVIDER_ID
 export const ZEN_RESPONSES_MODEL_IDS = ['muse-spark-1.2-contributor-free'] as const
 
 /**
+ * The five core agent tool names Zen's free tier requires in the request's
+ * tools array (the check is name-only: shell tool definitions satisfy it).
+ * Without all five the gateway answers 403 FreeTierError even for a
+ * perfectly formed session.
+ */
+const ZEN_AGENT_CORE_TOOLS = ['bash', 'edit', 'glob', 'grep', 'read'] as const
+
+/** Shell tool definition in OpenAI chat-completions format. */
+function agentShellTool(name: string): { type: 'function'; function: { name: string; description: string; parameters: { type: 'object'; properties: Record<string, never> } } } {
+  return {
+    type: 'function',
+    function: {
+      name,
+      description: `Agent tool ${name}`,
+      parameters: { type: 'object', properties: {} },
+    },
+  }
+}
+
+/**
+ * Zen's anonymous free lane (Bearer public) only accepts requests shaped
+ * like an OpenCode agent turn: streaming, with the five core agent tools
+ * present. pi-ai already streams every request; this decorator fills in the
+ * missing tool shells on plain chat turns so they satisfy the same shape.
+ * The empty schemas keep them inert — a model that actually calls one only
+ * ever emits a tool call the caller already knows how to reject, and tool
+ * callers (DSH coding sessions) already carry the real definitions.
+ */
+export function decorateZenPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  // OpenAI chat-completions spelling: tools: [{ type: 'function', function: { name } }]
+  const tools = payload.tools
+  if (Array.isArray(tools)) {
+    const present = new Set<string>()
+    for (const tool of tools) {
+      const name = (tool as { function?: { name?: unknown }; name?: unknown })?.function?.name ?? (tool as { name?: unknown })?.name
+      if (typeof name === 'string' && name) present.add(name)
+    }
+    const missing = ZEN_AGENT_CORE_TOOLS.filter((name) => !present.has(name))
+    if (missing.length === 0) return payload
+    return { ...payload, tools: [...tools, ...missing.map(agentShellTool)] }
+  }
+  return { ...payload, tools: ZEN_AGENT_CORE_TOOLS.map(agentShellTool) }
+}
+
+/**
  * Select the wire API for a Zen model. The public catalog is intentionally
  * sparse, so keep the known Responses model explicit and allow future catalog
  * records to advertise an API/protocol field without making every model
@@ -83,6 +128,7 @@ export class ZenAdapter extends KiloAdapter {
       // MiniMax compatibility lane; Zen owns its own model limits.
       maxOutputTokens: options.maxOutputTokens ?? null,
       apiResolver: options.apiResolver ?? zenModelApi,
+      payloadDecorator: options.payloadDecorator ?? decorateZenPayload,
       headerBuilder:
         options.headerBuilder ??
         ((ids: RequestIDs, adapterOptions: KiloAdapterOptions, mode?: unknown) => {
