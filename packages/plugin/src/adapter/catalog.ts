@@ -158,8 +158,6 @@ export interface KiloModelInfo {
    * effort before provider I/O, so this list doubles as the accepted set.
    */
   reasoningEfforts?: string[]
-  /** Effort DSH materializes into a request when the caller omits one. */
-  defaultReasoningEffort?: string
   supportsTools: boolean
 }
 

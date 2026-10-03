@@ -175,23 +175,39 @@ The adapter therefore translates the number itself, with no configuration:
    `qwen/qwen3.8-27b:free` drops from 235,929 to 65,536, which leaves 196,608
    tokens of prompt budget and a 131,072-token compaction pressure budget;
    declarations that equal the window (`stepfun/step-3.7-flash:free`) collapse
-   the same way.
-2. **Each request is clamped against the measured prompt** — before dispatch the
-   adapter estimates input tokens by character class (ASCII letters and spaces at
-   ~4.3 chars/token, digits and punctuation at ~2.2, one token per CJK character,
-   a flat rate for images) and limits `max_tokens` to
-   `window - estimate - safety margin`, so prompt + answer always fit, however
-   large the conversation has grown. pi-ai applies a similar clamp of its own,
-   but it assumes ~4 characters per token everywhere, which is optimistic for
-   JSON and tool payloads; the adapter's estimate is what protects those.
-3. **The estimate learns from the gateway** — every successful response carries
-   the endpoint's own `prompt_tokens`. The adapter folds that ratio back into a
-   per-model calibration factor (exponential moving average, clamped to 1.0 so it
-   never becomes optimistic), which removes the systematic drift one estimator
-   constant cannot: prose-heavy sessions were over-counted by ~15% (silently
-   shrinking the answer budget, or producing a false overflow on a session that
-   was 94% full), while dense JSON is under-counted by a chars-per-token rule.
-4. **A prompt that leaves no room reports a recognizable overflow** — instead of
+   the same way. Note the pressure budget is only positive for windows above
+   ~87,381 tokens, because compaction-basic reserves a fixed 65,536-token
+   headroom of its own: smaller windows stay outside automatic compaction at any
+   share, which no output declaration can fix.
+2. **Each request is clamped against the estimated prompt** — before dispatch the
+   adapter estimates input tokens from the prompt's structure and limits
+   `max_tokens` to `window - estimate - safety margin`, so prompt + answer always
+   fit, however large the conversation has grown. pi-ai applies a similar clamp
+   of its own, but it assumes ~4 characters per token everywhere, which is
+   optimistic for tool payloads; the adapter's estimate is what protects those.
+3. **The estimate is conservative by construction** — measured against
+   `cl100k_base`, one chars-per-token constant cannot cover content whose real
+   density spans 5.58 (prose) to 0.38 (emoji) characters per token. The estimator
+   therefore classifies each whitespace-separated run: word-sized runs are
+   charged fragment by fragment, while long runs are split into code-like
+   (structural punctuation), data-like (base64, hex, ids — checked by vowel
+   fraction, since `sha512-…` looks nothing like a word) and word-like, each with
+   its own measured cost. The test suite pins eleven such classes to counts
+   recorded from `cl100k_base` and asserts the estimate is never below them —
+   an earlier version charged every ASCII letter at 4.3 chars/token and
+   under-counted base64 by 2.6x, which reproduced the very 400 this budget
+   exists to prevent.
+4. **The estimate learns from the gateway** — every successful response carries
+   the endpoint's own prompt count. The adapter folds that ratio back into a
+   per-model calibration factor (exponential moving average, bounded to
+   `[0.5, 4]`), which removes the systematic drift the constants leave behind:
+   the estimator is deliberately pessimistic (up to 2.0x on tag-heavy HTML), and
+   a route whose real prompt turns out even denser than any measured class can
+   now be corrected *upward*, which a clamp at 1.0 made impossible. The cached
+   part of the prompt is added back before folding, because DSH reports cached
+   input separately (`inputTokens` is the uncached remainder) and a long cached
+   session would otherwise look like a prompt an order of magnitude too small.
+5. **A prompt that leaves no room reports a recognizable overflow** — instead of
    spending a request the gateway is guaranteed to reject, the adapter returns
    `CONTEXT_WINDOW_EXCEEDED` with the overflow wording both pi-ai and dsh-llm
    recognize plus what to do about it (compact the session, use a larger-window

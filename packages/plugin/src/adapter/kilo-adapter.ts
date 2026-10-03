@@ -12,7 +12,7 @@ import {
   type KiloModelInfo,
 } from './catalog.ts'
 import { toStreamChunks, CONTEXT_WINDOW_EXCEEDED, type HarnessChunk, type PiEvent } from './events.ts'
-import { estimateRequestTokens, blendCalibration, overflowMessage, resolveWireBudget } from './budget.ts'
+import { estimateRequestTokens, blendCalibration, overflowMessage, resolveWireBudget, MIN_ANSWER_TOKENS } from './budget.ts'
 import { deriveRequestIDs, kiloHeaders, kiloUserAgent, type RequestIDs } from './ids.ts'
 import {
   toPiContext,
@@ -181,15 +181,14 @@ const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
  * `thinkingLevelMap: { off: null }`, was an explicit `{"effort":"none"}` that
  * disabled thinking on reasoning models.
  */
-function reasoningInfo(
-  info: Pick<KiloModelInfo, 'reasoning' | 'reasoningEfforts' | 'defaultReasoningEffort'>,
-): LlmModelReasoningInfo | undefined {
+function reasoningInfo(info: Pick<KiloModelInfo, 'reasoning' | 'reasoningEfforts'>): LlmModelReasoningInfo | undefined {
   if (!info.reasoning || !Array.isArray(info.reasoningEfforts) || info.reasoningEfforts.length === 0) return undefined
   type EffortId = LlmModelReasoningInfo['efforts'][number]['id']
   const efforts = info.reasoningEfforts.map((id) => ({ id: id as EffortId, name: REASONING_EFFORT_LABELS[id] ?? id }))
-  const preferred = info.defaultReasoningEffort
-  if (preferred === undefined || !efforts.some((effort) => effort.id === preferred)) return { efforts }
-  return { efforts, defaultEffort: preferred as EffortId }
+  // No `defaultEffort` on purpose: measured against the live gateway, an omitted
+  // effort spends the strongest tier the provider offers, so pinning one here
+  // would silently make every session think less than the model would on its own.
+  return { efforts }
 }
 
 function modelToPiModel(
@@ -483,7 +482,9 @@ export class KiloAdapter {
       }
       return
     }
-    const wireMaxTokens = budget.maxTokens ?? clampMaxTokens(options.maxTokens, info.maxTokens)
+    // `budget.overflow` returned already, so a budget is always present here;
+    // falling back to the model cap would bypass the prompt clamp entirely.
+    const wireMaxTokens = budget.maxTokens ?? MIN_ANSWER_TOKENS
     const baseHeaders = requestHeaders(ids, this.#options, options.mode)
     const headers: ProviderHeaders = { ...baseHeaders }
     if (!this.#apiKey) {
@@ -511,23 +512,33 @@ export class KiloAdapter {
       maxTokens: wireMaxTokens,
       reasoning: thinkingLevel(options.reasoningEffort),
       onPayload: (payload) => {
-        const clamped = clampPayloadMaxTokens(payload, wireMaxTokens ?? info.maxTokens)
+        const clamped = clampPayloadMaxTokens(payload, wireMaxTokens)
         const record = (clamped ?? payload) as Record<string, unknown>
         return this.#options.payloadDecorator ? this.#options.payloadDecorator(record) : record
       },
     })
     // Forward the stream while watching for the gateway's own usage report: the
-    // real input count against our raw estimate is the calibration sample that
-    // keeps future budgets honest.
-    let reportedInputTokens: number | undefined
+    // full prompt it counted, against our raw estimate, is the calibration
+    // sample that keeps future budgets honest. `inputTokens` alone is the wrong
+    // sample — dsh-llm reports cached input separately and pi-ai derives it as
+    // `prompt_tokens - cacheRead - cacheWrite` — so a cached session would look
+    // like a prompt an order of magnitude smaller than it really is.
+    let reportedPromptTokens: number | undefined
     let failed = false
     for await (const chunk of toStreamChunks(events as unknown as AsyncIterable<PiEvent>, model.contextWindow)) {
-      if (chunk.type === 'usage' && chunk.usage.inputTokens > 0) reportedInputTokens = chunk.usage.inputTokens
+      if (chunk.type === 'usage') {
+        const accounted =
+          chunk.usage.inputTokens + (chunk.usage.cacheReadTokens ?? 0) + (chunk.usage.cacheWriteTokens ?? 0)
+        if (accounted > 0) reportedPromptTokens = accounted
+      }
       if (chunk.type === 'finish' && chunk.reason.kind === 'error') failed = true
       yield chunk
     }
-    if (!failed && reportedInputTokens !== undefined && rawInputTokens > 0) {
-      this.#calibration.set(modelId, blendCalibration(this.#calibration.get(modelId), reportedInputTokens / rawInputTokens))
+    if (!failed && reportedPromptTokens !== undefined && rawInputTokens > 0) {
+      this.#calibration.set(
+        modelId,
+        blendCalibration(this.#calibration.get(modelId), reportedPromptTokens / rawInputTokens),
+      )
     }
   }
 

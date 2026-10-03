@@ -19,7 +19,7 @@
  *
  * Three guards keep the adapter self-correcting with no user configuration:
  * `outputCeilingForWindow` bounds the *declared* budget (model metadata),
- * `resolveWireBudget` clamps the budget sent against the measured prompt size,
+ * `resolveWireBudget` clamps the budget sent against the estimated prompt size,
  * and `blendCalibration` folds the gateway's own usage report back into the
  * estimator so the estimate stops drifting away from reality.
  */
@@ -31,6 +31,12 @@ import type { HarnessBlock, HarnessGenerateOptions, HarnessMessage } from './mes
  * router's per-request cap and the harness's reserved budget are different
  * quantities: 25% keeps output generous for agent work while leaving the
  * harness most of the window for input plus compaction headroom.
+ *
+ * Note the harness's compaction pressure budget is
+ * `contextWindow - maxTokens - headroomTokens`, and `compaction-basic` defaults
+ * `headroomTokens` to 65536, so a window at or below ~87381 tokens has no
+ * positive pressure budget at any share: those models stay outside automatic
+ * compaction, which is a harness limit rather than something this share can fix.
  */
 export const MAX_OUTPUT_WINDOW_SHARE = 0.25
 
@@ -54,31 +60,106 @@ export const MIN_WIRE_SAFETY_TOKENS = 1024
 export const MIN_ANSWER_TOKENS = 2048
 
 /**
- * Characters per token for ASCII letters and spaces. English prose tokenizes
- * near 4.3 characters per token; code and JSON are denser and are charged
- * through {@link SYMBOLS_PER_TOKEN} instead.
+ * Character classes, measured against `cl100k_base`, that drive the prompt
+ * estimate. Values are *characters per token*, so a smaller number means a
+ * denser (more expensive) class:
+ *
+ * | content                        | measured chars/token |
+ * | ------------------------------ | -------------------- |
+ * | English prose                  | 5.58                 |
+ * | TypeScript source              | 4.23                 |
+ * | markdown / HTML / minified JS  | 3.36 - 3.59          |
+ * | tool JSON                      | 3.38                 |
+ * | URLs                           | 2.70                 |
+ * | pure digits                    | 2.99                 |
+ * | random hex / UUIDs             | 1.76 - 1.95          |
+ * | random lowercase letters       | 1.62                 |
+ * | random base64                  | 1.39                 |
+ * | CJK                            | 1.00                 |
+ * | emoji (incl. ZWJ sequences)    | 0.38                 |
+ *
+ * Every constant below sits on the conservative side of those measurements, so
+ * the estimate is never smaller than the gateway's own count for the samples in
+ * `test/budget.test.ts`. That matters because an optimistic estimate is exactly
+ * what produced the original 400.
  */
-const LETTERS_PER_TOKEN = 4.3
+const WORD = { letters: 3.6, digits: 2.6, struct: 1.7, other: 1.7 } as const
 
-/** Characters per token for digits and punctuation (JSON, code, logs). */
-const SYMBOLS_PER_TOKEN = 2.2
+/** Long runs that look like structured text: code, JSON, HTML, URLs. */
+const STRUCTURED = { letters: 2.4, digits: 1.35, struct: 1.8, other: 1.4 } as const
+
+/** Long runs that look like machine data: base64, hex, hashes, opaque ids. */
+const DATA = { letters: 1.2, digits: 2.2, struct: 1.5, other: 1.3 } as const
+
+/** Letters in a long but word-shaped run (no spaces, vowels present). */
+const WORDLIKE_LETTERS = 2.6
+
+/**
+ * Runs longer than this are treated as machine data rather than words: prose
+ * separates words with spaces, so a 16+ character run without whitespace is
+ * usually an id, a hash, base64, or minified code.
+ */
+const LONG_RUN = 16
+
+/** Structural punctuation, used to separate code-like from data-like runs. */
+const STRUCTURAL = new Set('"\'{}[]<>()=:,;.!?&%$#@*|/\\^~`+-')
+
+/**
+ * English words draw ~38% of their letters from `aeiou`; random base64/hex
+ * draws ~20%. Runs below this fraction are charged as data even when JSON
+ * punctuation surrounds them, which is what a hashed `integrity` field looks
+ * like.
+ */
+const WORD_VOWEL_FLOOR = 0.28
+
+/** Structural punctuation share that marks a long run as code-like. */
+const STRUCTURED_RATIO = 0.08
+
+/** Digit share that marks a long run as data-like (hex, ids, timestamps). */
+const DIGITS_RATIO = 0.1
+
+/** Characters per token for whitespace: spaces measured 125, newlines 29. */
+const SPACE_CHARS_PER_TOKEN = 16
+const NEWLINE_TOKENS = 0.5
+
+/**
+ * Non-ASCII text costs a token per character on average, and CJK measured
+ * slightly denser than that (0.94 characters per token), so it is charged a
+ * little above one token per character.
+ */
+const WIDE_TOKENS = 1.1
+
+/** A letter fragment at least this long can be judged random instead of a word. */
+const RANDOM_MIN_LENGTH = 6
+
+/** Tokens per code point for emoji, including ZWJ sequence members. */
+const EMOJI_TOKENS = 3
 
 /** Per-message envelope cost (role markers, separators). */
 const MESSAGE_OVERHEAD_TOKENS = 4
 
-/** Inline image payloads are not text: charge a flat rate instead of their base64 size. */
-const IMAGE_TOKENS = 1600
+/**
+ * Flat charge for an inline image. The adapter downscales to at most 1568px
+ * (`messages.ts`), which bills at roughly `(1568 / 28) ** 2 ≈ 3136` tokens on
+ * the providers that price tiles; charging that keeps a screenshot-heavy
+ * session from looking like text.
+ */
+const IMAGE_TOKENS = 3200
 
 /** One-off request envelope cost (system preamble, tool schema framing). */
 const FIXED_OVERHEAD_TOKENS = 256
 
 /**
- * Bounds for {@link blendCalibration}. The observed ratio of gateway count to
- * our estimate can be well below 1 (prose over-counts) but never meaningfully
- * above it: clamping at 1 keeps the estimator on the conservative side.
+ * Bounds for {@link blendCalibration}, as a multiplier on the raw estimate.
+ *
+ * The floor corrects the estimator's deliberate pessimism (measured up to 1.8x
+ * on HTML-heavy input). The ceiling has to sit well above 1: a route whose real
+ * prompt turns out denser than any class we model must be *correctable upward*,
+ * and clamping at 1 is what made an earlier version unable to learn from a
+ * 2.6x under-estimate.
  */
 export const MIN_CALIBRATION = 0.5
-export const MAX_CALIBRATION = 1
+export const MAX_CALIBRATION = 4
 
 /** EMA weight of one fresh usage report. */
 export const CALIBRATION_ALPHA = 0.3
@@ -95,42 +176,171 @@ export function wireSafetyTokens(contextWindow: number): number {
   return Math.max(MIN_WIRE_SAFETY_TOKENS, Math.ceil(contextWindow * WIRE_SAFETY_SHARE))
 }
 
+type CharClass = 'letters' | 'digits' | 'struct' | 'other' | 'wide'
+
+const VOWELS = new Set('aeiouAEIOU')
+
+function classify(char: string): CharClass {
+  const code = char.codePointAt(0) ?? 0
+  if (code > 0x7f) return 'wide'
+  if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122)) return 'letters'
+  if (code >= 48 && code <= 57) return 'digits'
+  if (STRUCTURAL.has(char)) return 'struct'
+  return 'other'
+}
+
 /**
- * Approximate one string's token cost from its character classes.
- *
- * Measured against a real 248K-token agent session (prose, shell output, and
- * tool JSON): a single bytes-per-token divisor cannot fit both English prose
- * (~4.3 chars/token) and JSON/code (~2.5-3), and the error either wastes the
- * harness's answer budget or overflows the gateway. Classifying the characters
- * keeps the estimate within a few percent of the gateway on both.
+ * Emoji and their joiners cost far more than their code point count: a ZWJ
+ * sequence measured 0.38 characters per token, so each code point is charged as
+ * several tokens.
  */
-function textTokens(text: string): number {
-  let letters = 0
-  let symbols = 0
-  let wide = 0
-  for (const char of text) {
-    const code = char.codePointAt(0) ?? 0
-    if (code <= 0x7f) {
-      // Space belongs to the prose class; digits and punctuation to the dense one.
-      if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 32) letters += 1
-      else symbols += 1
-    } else {
-      // CJK and other non-ASCII text costs about one token per character.
-      wide += 1
+function isEmoji(code: number): boolean {
+  return (
+    (code >= 0x1f000 && code <= 0x1faff) ||
+    (code >= 0x2600 && code <= 0x27bf) ||
+    (code >= 0x1f1e6 && code <= 0x1f1ff) ||
+    (code >= 0x2190 && code <= 0x21ff) ||
+    (code >= 0x2b00 && code <= 0x2bff) ||
+    code === 0xfe0f ||
+    code === 0x200d
+  )
+}
+
+/**
+ * Charge one short (word-sized) run, one tokenizer fragment at a time.
+ *
+ * Tokenizers emit roughly one token per homogeneous fragment: `dur=42ms` costs
+ * four tokens, not the two a purely linear per-class charge would predict,
+ * because letters, `=`, digits and letters each start a new token. Letter
+ * fragments of six characters or more are additionally checked for vowels: a
+ * short random id (`qxzjvbnmwrts`) tokenizes like data, not like a word.
+ */
+function shortRunTokens(run: string): number {
+  let tokens = 0
+  let className: CharClass | undefined
+  let length = 0
+  let vowels = 0
+  const flush = () => {
+    if (className !== undefined && length > 0) {
+      if (className === 'letters') {
+        tokens +=
+          length >= RANDOM_MIN_LENGTH && vowels / length < WORD_VOWEL_FLOOR
+            ? length / DATA.letters
+            : Math.max(1, Math.floor(length / WORD.letters))
+      } else if (className !== 'wide') {
+        tokens += Math.max(1, Math.floor(length / WORD[className]))
+      }
     }
+    className = undefined
+    length = 0
+    vowels = 0
   }
-  return letters / LETTERS_PER_TOKEN + symbols / SYMBOLS_PER_TOKEN + wide
+  for (const char of run) {
+    const kind = classify(char)
+    if (kind === 'wide') {
+      flush()
+      tokens += isEmoji(char.codePointAt(0) ?? 0) ? EMOJI_TOKENS : WIDE_TOKENS
+      continue
+    }
+    if (kind === className) {
+      length += 1
+      if (VOWELS.has(char)) vowels += 1
+      continue
+    }
+    flush()
+    className = kind
+    length = 1
+    vowels = VOWELS.has(char) ? 1 : 0
+  }
+  flush()
+  return tokens
+}
+
+/**
+ * Charge one long (machine-data-sized) run.
+ *
+ * Long runs cannot use the word table: random base64 is 1.39 characters per
+ * token while English words are 4.3-5.6, and both are "letters". The run is
+ * therefore classified first, using the signals that separate code from data:
+ * structural punctuation (code and JSON are full of it), digit share (hex, ids
+ * and timestamps), and the vowel fraction of its letters (base64 and hashes
+ * look nothing like words).
+ */
+function longRunTokens(run: string): number {
+  let letters = 0
+  let digits = 0
+  let struct = 0
+  let other = 0
+  let vowels = 0
+  let wide = 0
+  let emoji = 0
+  for (const char of run) {
+    const kind = classify(char)
+    if (kind === 'wide') {
+      wide += 1
+      if (isEmoji(char.codePointAt(0) ?? 0)) emoji += 1
+      continue
+    }
+    if (kind === 'letters') {
+      letters += 1
+      if (VOWELS.has(char)) vowels += 1
+      continue
+    }
+    if (kind === 'digits') digits += 1
+    else if (kind === 'struct') struct += 1
+    else other += 1
+  }
+  let tokens = (wide - emoji) * WIDE_TOKENS + emoji * EMOJI_TOKENS
+  const ascii = letters + digits + struct + other
+  if (ascii === 0) return tokens
+  const vowelFraction = letters > 0 ? vowels / letters : 0
+  const looksRandom = letters / ascii >= 0.6 && vowelFraction < WORD_VOWEL_FLOOR
+  let table: { letters: number; digits: number; struct: number; other: number }
+  if (struct / ascii >= STRUCTURED_RATIO && !looksRandom) table = STRUCTURED
+  else if (digits / ascii >= DIGITS_RATIO) table = DATA
+  else if (letters / ascii >= 0.9 && vowelFraction >= WORD_VOWEL_FLOOR) table = { ...WORD, letters: WORDLIKE_LETTERS }
+  else table = DATA
+  tokens += letters / table.letters + digits / table.digits + struct / table.struct + other / table.other
+  return tokens
+}
+
+/** Approximate one string's token cost from its whitespace-separated runs. */
+function textTokens(text: string): number {
+  let tokens = 0
+  let run = ''
+  for (const char of text) {
+    if (char === ' ') {
+      if (run !== '') tokens += run.length <= LONG_RUN ? shortRunTokens(run) : longRunTokens(run)
+      run = ''
+      tokens += 1 / SPACE_CHARS_PER_TOKEN
+      continue
+    }
+    if (char === '\n' || char === '\t') {
+      if (run !== '') tokens += run.length <= LONG_RUN ? shortRunTokens(run) : longRunTokens(run)
+      run = ''
+      tokens += NEWLINE_TOKENS
+      continue
+    }
+    run += char
+  }
+  if (run !== '') tokens += run.length <= LONG_RUN ? shortRunTokens(run) : longRunTokens(run)
+  return tokens
+}
+
+/** Estimate a field that is documented as text but arrives unvalidated. */
+function textTokensOf(value: unknown): number {
+  return typeof value === 'string' ? textTokens(value) : 0
 }
 
 function blockTokens(block: HarnessBlock): number {
   switch (block.type) {
     case 'text':
     case 'reasoning':
-      return textTokens(block.text)
+      return textTokensOf(block.text)
     case 'tool-call':
-      return textTokens(block.name) + textTokens(block.arguments) + 8
+      return textTokensOf(block.name) + textTokensOf(block.arguments) + 8
     case 'tool-result': {
-      let tokens = textTokens(block.toolCallId) + 8
+      let tokens = textTokensOf(block.toolCallId) + 8
       for (const nested of Array.isArray(block.content) ? block.content : []) tokens += blockTokens(nested)
       return tokens
     }
@@ -154,21 +364,22 @@ function messageTokens(message: HarnessMessage): number {
  *
  * The estimate feeds {@link resolveWireBudget}: it exists so a request can never
  * ask for prompt + answer beyond the gateway's window. It is deliberately
- * mildly conservative on every character class, and
- * {@link blendCalibration} removes the remaining systematic drift once the
- * gateway has reported its own count for this route.
+ * conservative on every character class — verified sample by sample against
+ * `cl100k_base` in the tests — and {@link blendCalibration} removes the
+ * remaining systematic drift once the gateway has reported its own count for
+ * this route.
  *
  * @param options - the harness request about to be dispatched.
- * @returns a token estimate close to, and normally slightly above, the gateway count.
+ * @returns a token estimate at or above the gateway's count for measured content.
  */
 export function estimateRequestTokens(
   options: Pick<HarnessGenerateOptions, 'messages' | 'system' | 'tools'>,
 ): number {
   let tokens = FIXED_OVERHEAD_TOKENS
-  if (typeof options.system === 'string') tokens += textTokens(options.system)
+  tokens += textTokensOf(options.system)
   for (const message of Array.isArray(options.messages) ? options.messages : []) tokens += messageTokens(message)
   for (const tool of Array.isArray(options.tools) ? options.tools : []) {
-    tokens += textTokens(tool.name) + textTokens(tool.description)
+    tokens += textTokensOf(tool.name) + textTokensOf(tool.description)
     try {
       tokens += textTokens(JSON.stringify(tool.parameters ?? {}))
     } catch {
@@ -181,12 +392,17 @@ export function estimateRequestTokens(
 /**
  * Fold one gateway usage report into the estimator's calibration factor.
  *
+ * The observed ratio is `reportedPromptTokens / rawEstimate`, so a value above 1
+ * means the estimator was optimistic for this route and the factor moves up
+ * toward {@link MAX_CALIBRATION}. Non-finite or non-positive observations leave
+ * the previous factor untouched.
+ *
  * @param previous - current factor for the route, when a request already reported usage.
- * @param observed - gateway input tokens divided by this adapter's raw estimate.
- * @returns the blended factor, clamped so the estimator never becomes optimistic.
+ * @param observed - gateway prompt tokens divided by this adapter's raw estimate.
+ * @returns the blended factor, clamped to the configured bounds.
  */
 export function blendCalibration(previous: number | undefined, observed: number): number {
-  if (!Number.isFinite(observed) || observed <= 0) return previous ?? MAX_CALIBRATION
+  if (!Number.isFinite(observed) || observed <= 0) return previous ?? 1
   const bounded = Math.min(MAX_CALIBRATION, Math.max(MIN_CALIBRATION, observed))
   if (previous === undefined || !Number.isFinite(previous)) return bounded
   const blended = previous + (bounded - previous) * CALIBRATION_ALPHA
@@ -204,7 +420,7 @@ export interface WireBudgetInput {
   estimatedInputTokens: number
   /**
    * Calibration factor learned from this route's own usage reports
-   * ({@link blendCalibration}). Defaults to 1 (fully conservative estimate).
+   * ({@link blendCalibration}). Defaults to 1 (uncalibrated estimate).
    */
   calibration?: number
 }
@@ -212,7 +428,7 @@ export interface WireBudgetInput {
 export interface WireBudget {
   /** `max_tokens` to send; absent only when {@link WireBudget.overflow} is set. */
   maxTokens?: number
-  /** Prompt-size estimate after calibration, for logging and messages. */
+  /** Prompt-size estimate after calibration and the reported floor. */
   effectiveInputTokens: number
   /**
    * True when even a minimal answer cannot fit next to the prompt: the adapter
@@ -231,17 +447,29 @@ function positiveInteger(value: number | string | null | undefined): number | un
 /**
  * Clamp the output budget of one request to the room its prompt leaves.
  *
+ * A gateway-reported prompt size is deliberately not used as a floor here. A
+ * reported 215K against an 82K estimate means the estimator was optimistic,
+ * while a reported 215K against a 10K estimate after compaction means the
+ * session shrank, and these are indistinguishable from the numbers alone; a
+ * floor that guesses wrong refuses a prompt that fits, on every retry.
+ * {@link blendCalibration} recovers that precision instead, and its upward bound
+ * lets a route learn from an under-estimate without refusing anything.
+ *
  * @param input - requested budget, model cap, window, prompt estimate, calibration.
  * @returns the budget to send, or an overflow signal when nothing usable fits.
  */
 export function resolveWireBudget(input: WireBudgetInput): WireBudget {
-  const cap = Math.max(1, Math.min(positiveInteger(input.modelMaxTokens) ?? 1, positiveInteger(input.contextWindow) ?? 1))
+  const window = positiveInteger(input.contextWindow) ?? 1
+  const cap = Math.max(1, Math.min(positiveInteger(input.modelMaxTokens) ?? 1, window))
   const requested = positiveInteger(input.requested) ?? cap
   const ceiling = Math.min(requested, cap)
-  const calibration = Number.isFinite(input.calibration) ? Math.min(1, Math.max(MIN_CALIBRATION, input.calibration as number)) : 1
-  const effectiveInputTokens = Math.ceil(Math.max(0, input.estimatedInputTokens) * calibration)
-  const room = Math.floor(input.contextWindow - effectiveInputTokens - wireSafetyTokens(input.contextWindow))
-  if (room < MIN_ANSWER_TOKENS) return { effectiveInputTokens, overflow: true }
+  const calibration = Number.isFinite(input.calibration)
+    ? Math.min(MAX_CALIBRATION, Math.max(MIN_CALIBRATION, input.calibration as number))
+    : 1
+  const rawEstimate = Math.max(0, Number.isFinite(input.estimatedInputTokens) ? input.estimatedInputTokens : 0)
+  const effectiveInputTokens = Math.ceil(rawEstimate * calibration)
+  const room = window - effectiveInputTokens - wireSafetyTokens(window)
+  if (!Number.isFinite(room) || room < MIN_ANSWER_TOKENS) return { effectiveInputTokens, overflow: true }
   return { maxTokens: Math.min(ceiling, room), effectiveInputTokens, overflow: false }
 }
 

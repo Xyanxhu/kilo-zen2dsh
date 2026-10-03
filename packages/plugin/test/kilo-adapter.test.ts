@@ -5,6 +5,7 @@ import { ModelCatalog } from '../src/adapter/catalog.ts'
 import { KILO_GATEWAY_MAX_OUTPUT_TOKENS } from '../src/adapter/catalog.ts'
 import { outputCeilingForWindow } from '../src/adapter/budget.ts'
 import { clampMaxTokens, PROVIDER_ID, KiloAdapter } from '../src/adapter/kilo-adapter.ts'
+import { estimateRequestTokens, wireSafetyTokens } from '../src/adapter/budget.ts'
 
 /**
  * The exact method surface dsh-llm touches on a registered adapter. A missing
@@ -368,7 +369,7 @@ test('a directory cap that fills the window cannot overflow the request', async 
     assert.equal(resolved.defaultMaxTokens, 65_536)
     assert.equal(resolved.context.contextWindow, 262_144)
 
-    // A ~45K-token prompt, like the reported session (34816 text + 7524 tool).
+    // A ~110K-token prompt, like the reported session (34816 text + 7524 tool).
     const contextWindow = resolved.context.contextWindow
     const prompt = 'x'.repeat(135_000)
     for await (const _chunk of adapter.stream({
@@ -385,11 +386,14 @@ test('a directory cap that fills the window cannot overflow the request', async 
 
     // A prompt that eats the window shrinks the answer instead of overflowing.
     requestBody = ''
-    const huge = 'x'.repeat(900_000)
+    const tightPrompt = 'x'.repeat(252_000)
+    const tightEstimate = estimateRequestTokens({
+      messages: [{ role: 'user', content: [{ type: 'text', text: tightPrompt }] }],
+    })
     for await (const _chunk of adapter.stream({
       provider: PROVIDER_ID,
       model,
-      messages: [{ role: 'user', content: [{ type: 'text', text: huge }] }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: tightPrompt }] }],
       maxTokens: resolved.defaultMaxTokens,
     })) {
       // consume the stream
@@ -398,7 +402,23 @@ test('a directory cap that fills the window cannot overflow the request', async 
     assert.ok(tight.max_tokens !== undefined)
     assert.ok(tight.max_tokens! < 65_536, `wire budget should shrink below the declared cap, got ${tight.max_tokens}`)
     // Prompt estimate + answer budget must stay inside the window.
-    assert.ok(tight.max_tokens! + Math.ceil(huge.length / 4.3) < contextWindow)
+    assert.ok(tightEstimate + tight.max_tokens! + wireSafetyTokens(contextWindow) <= contextWindow)
+
+    // A prompt that genuinely cannot fit spends no request at all.
+    requestBody = ''
+    const hopeless = 'x'.repeat(900_000)
+    const chunks = []
+    for await (const chunk of adapter.stream({
+      provider: PROVIDER_ID,
+      model,
+      messages: [{ role: 'user', content: [{ type: 'text', text: hopeless }] }],
+      maxTokens: resolved.defaultMaxTokens,
+    })) {
+      chunks.push(chunk)
+    }
+    const finish = chunks.at(-1)
+    assert.equal(finish?.type === 'finish' && finish.reason.kind === 'error' ? finish.reason.failure.code : undefined, 'CONTEXT_WINDOW_EXCEEDED')
+    assert.equal(requestBody, '', 'no request should reach a gateway for a prompt that cannot fit')
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
   }
@@ -447,11 +467,9 @@ test('a prompt that leaves no room reports context overflow without a request', 
 test('gateway usage reports calibrate the prompt estimate for later requests', async () => {
   // Regression: on a prose-heavy 248K-token session the raw estimate read
   // 286K (+15%), which left a negative budget and produced a false context
-  // overflow. The gateway's own prompt_tokens must fold back into the estimate.
-  // Dense JSON is the case that matters here: pi-ai already clamps prose with
-  // its own ~4-chars-per-token rule, but it reads JSON/code optimistically, so
-  // the adapter's own budget is what binds.
+  // overflow. The gateway's own prompt count must fold back into the estimate.
   const bodies: Array<{ max_tokens?: number }> = []
+  let usage: Record<string, unknown> = { prompt_tokens: 130_000, completion_tokens: 1 }
   const server = createServer((req, res) => {
     let raw = ''
     req.on('data', (chunk) => {
@@ -464,8 +482,8 @@ test('gateway usage reports calibrate the prompt estimate for later requests', a
         [
           `data: ${JSON.stringify({ id: 'c1', choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' } }] })}`,
           '',
-          // The endpoint reports a prompt far smaller than the raw estimate.
-          `data: ${JSON.stringify({ id: 'c1', choices: [], usage: { prompt_tokens: 130_000, completion_tokens: 1 } })}`,
+          // The endpoint reports a prompt smaller than the raw estimate.
+          `data: ${JSON.stringify({ id: 'c1', choices: [], usage })}`,
           '',
           `data: ${JSON.stringify({ id: 'c1', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}`,
           '',
@@ -485,9 +503,9 @@ test('gateway usage reports calibrate the prompt estimate for later requests', a
       decision: () => ({ allowed: true, source: 'catalog_free', known: true }),
       get: () => ({ id: model, isFree: true, context_length: 262_144, top_provider: { context_length: 262_144, max_completion_tokens: 65_536 } }),
     }
-    const adapter = new KiloAdapter(catalog, { gatewayBaseUrl: `http://127.0.0.1:${address.port}/api/gateway` })
-    const prompt = '{"a":1}'.repeat(71_429)
-    const send = async () => {
+    const prompt = '{"a":1}'.repeat(55_000)
+    const makeAdapter = () => new KiloAdapter(catalog, { gatewayBaseUrl: `http://127.0.0.1:${address.port}/api/gateway` })
+    const send = async (adapter: KiloAdapter) => {
       for await (const _chunk of adapter.stream({
         provider: PROVIDER_ID,
         model,
@@ -498,15 +516,38 @@ test('gateway usage reports calibrate the prompt estimate for later requests', a
       }
     }
 
-    await send()
-    // Uncalibrated: the dense prompt eats most of the window.
-    const first = bodies[0]?.max_tokens
-    assert.ok(first !== undefined)
-    assert.ok(first < 50_000, `expected a clamped first budget, got ${first}`)
-
-    await send()
+    const first = makeAdapter()
+    await send(first)
+    const uncalibrated = bodies[0]?.max_tokens
+    assert.ok(uncalibrated !== undefined && uncalibrated < 50_000, `expected a clamped first budget, got ${uncalibrated}`)
+    await send(first)
     // The reported 130K prompt restores the declared cap on the next request.
     assert.equal(bodies[1]?.max_tokens, 65_536)
+
+    // Regression: `inputTokens` alone is the *uncached* part of the prompt
+    // (pi-ai derives it as prompt_tokens - cacheRead - cacheWrite). A cached
+    // session therefore reported a tiny input count, the calibration floor
+    // halved the estimate, and the request was sent with a budget that no longer
+    // fit — the unsafe direction, on exactly the long sessions that matter.
+    for (const [label, reported] of [
+      ['uncached', { prompt_tokens: 200_000, completion_tokens: 1 }],
+      [
+        'mostly cached',
+        { prompt_tokens: 200_000, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 195_000 } },
+      ],
+    ] as const) {
+      usage = reported as Record<string, unknown>
+      const adapter = makeAdapter()
+      bodies.length = 0
+      await send(adapter)
+      await send(adapter)
+      const budget = bodies[1]?.max_tokens
+      assert.ok(budget !== undefined, `${label}: expected a second request`)
+      // The same real prompt must produce the same budget either way, and it has
+      // to leave the gateway's own 200K count its room.
+      assert.ok(budget < 65_536, `${label}: cached input must not inflate the budget to the cap (got ${budget})`)
+      assert.ok(200_000 + budget + wireSafetyTokens(262_144) <= 262_144, `${label}: budget ${budget} does not fit a 200K prompt`)
+    }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
   }
