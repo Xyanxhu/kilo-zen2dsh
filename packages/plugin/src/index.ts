@@ -138,6 +138,9 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
     gatewayBaseUrl: cfg.gatewayBaseUrl,
     apiKey: upstreamApiKey,
     anonymousKey: cfg.anonymousKey,
+    // Gateway compatibility ceiling only; the per-model budget the harness
+    // reserves is derived from each model's context window by the adapter.
+    maxOutputTokens: cfg.maxOutputTokens,
     attachments: attachmentsResolver(ctx),
   })
 

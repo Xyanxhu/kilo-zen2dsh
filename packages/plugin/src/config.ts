@@ -3,7 +3,7 @@ import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/pro
 import { dirname, join } from 'node:path'
 import { platform } from 'node:process'
 
-import { ANONYMOUS_API_KEY, KILO_GATEWAY_BASE_URL } from './adapter/catalog.ts'
+import { ANONYMOUS_API_KEY, KILO_GATEWAY_BASE_URL, KILO_GATEWAY_MAX_OUTPUT_TOKENS } from './adapter/catalog.ts'
 
 /**
  * Plugin configuration (cordis config object, injected via cordis.patch.yml).
@@ -33,6 +33,13 @@ export interface Kilo2dshConfig {
   anonymousKey?: string
   /** Hide models that explicitly do not advertise tool calling. */
   requireTools?: boolean
+  /**
+   * Optional ceiling for the Kilo gateway's *compatibility* output limit
+   * (default 524288; `null` disables it). This is not the per-model budget the
+   * harness reserves — the adapter derives that from each model's context
+   * window automatically (see adapter/budget.ts).
+   */
+  maxOutputTokens?: number | null
   /** Model list refresh interval in seconds (agent refresh_seconds matches). */
   refreshSeconds?: number
   /** Restart backoff: initial delay ms. */
@@ -77,6 +84,9 @@ export const defaults = {
   zenUserAgent: '',
   zenApiKeyEnv: '',
   zenAnonymousKey: 'public',
+  // Kilo's gateway compatibility ceiling; the per-model budget is derived from
+  // each model's context window and needs no configuration.
+  maxOutputTokens: KILO_GATEWAY_MAX_OUTPUT_TOKENS,
 }
 
 export type ResolvedConfig = Required<
@@ -87,6 +97,7 @@ export type ResolvedConfig = Required<
     | 'upstreamApiKeyEnv'
     | 'gatewayBaseUrl'
     | 'anonymousKey'
+    | 'maxOutputTokens'
     | 'requireTools'
     | 'refreshSeconds'
     | 'restartDelayMs'

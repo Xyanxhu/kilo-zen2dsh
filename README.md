@@ -90,6 +90,7 @@ Leaving it empty is intentional; the plugin will not pick up
 | `gatewayBaseUrl` | `https://api.kilo.ai/api/gateway` | Kilo-compatible gateway base URL. |
 | `refreshSeconds` | `300` | Model catalog refresh interval. |
 | `requireTools` | `true` | Hide free models that do not advertise `tools`. |
+| `maxOutputTokens` | `524288` | Kilo gateway compatibility output ceiling; `null` disables it. Per-model budgets are derived from the context window and need no configuration. |
 | `upstreamApiKeyEnv` | empty | Environment variable to opt into an explicit token. |
 | `anonymousKey` | empty | Optional token for a private compatible gateway; empty means no auth header. |
 | `zenEnabled` | `true` | Register the independent OpenCode Zen adapter in adapter mode. |
@@ -154,6 +155,95 @@ automatically; callers do not need to edit their model configuration. This
 keeps a 1M-token context declaration available for input while preventing the
 400 error shown by MiniMax-M3. The compatibility ceiling is Kilo-specific;
 OpenCode Zen keeps the limits reported by its own catalog.
+
+### Output budgets scale with the window
+
+A gateway's `max_completion_tokens` is a *per-request* maximum, while DSH reads
+`defaultMaxTokens` as the budget it must reserve on *every* request. Kilo's free
+lane reports the OpenRouter-style 90%-of-window figure, which breaks the harness
+twice: the request asks for an answer as large as the remaining window (prompt +
+output exceeds the limit, and the gateway answers 400 `requested about 262507
+tokens ... maximum context length is 262144`), and compaction-basic reserves the
+same figure, so `contextWindow - maxTokens - headroomTokens <= 0` leaves it
+without a pressure budget and automatic compaction stops working exactly when it
+is needed.
+
+The adapter therefore translates the number itself, with no configuration:
+
+1. **Declared budget scales with the window** — `defaultMaxTokens` never exceeds
+   25% of the context window (a smaller model-specific declaration still wins).
+   `qwen/qwen3.8-27b:free` drops from 235,929 to 65,536, which leaves 196,608
+   tokens of prompt budget and a 131,072-token compaction pressure budget;
+   declarations that equal the window (`stepfun/step-3.7-flash:free`) collapse
+   the same way.
+2. **Each request is clamped against the measured prompt** — before dispatch the
+   adapter estimates input tokens by character class (ASCII letters and spaces at
+   ~4.3 chars/token, digits and punctuation at ~2.2, one token per CJK character,
+   a flat rate for images) and limits `max_tokens` to
+   `window - estimate - safety margin`, so prompt + answer always fit, however
+   large the conversation has grown. pi-ai applies a similar clamp of its own,
+   but it assumes ~4 characters per token everywhere, which is optimistic for
+   JSON and tool payloads; the adapter's estimate is what protects those.
+3. **The estimate learns from the gateway** — every successful response carries
+   the endpoint's own `prompt_tokens`. The adapter folds that ratio back into a
+   per-model calibration factor (exponential moving average, clamped to 1.0 so it
+   never becomes optimistic), which removes the systematic drift one estimator
+   constant cannot: prose-heavy sessions were over-counted by ~15% (silently
+   shrinking the answer budget, or producing a false overflow on a session that
+   was 94% full), while dense JSON is under-counted by a chars-per-token rule.
+4. **A prompt that leaves no room reports a recognizable overflow** — instead of
+   spending a request the gateway is guaranteed to reject, the adapter returns
+   `CONTEXT_WINDOW_EXCEEDED` with the overflow wording both pi-ai and dsh-llm
+   recognize plus what to do about it (compact the session, use a larger-window
+   model, or start a new one), so DSH runs context-overflow compaction and
+   retries. The adapter refuses only when under 2,048 answer tokens would fit:
+   that constant is a *refusal* threshold, not an output cap — the budget
+   actually sent is always `window - prompt - safety`.
+
+`maxOutputTokens` (default 524,288, `null` disables it) remains available as the
+only knob, and only to rewrite the gateway compatibility ceiling. No per-model
+configuration is needed.
+
+### Thinking levels come from the catalog
+
+DSH shows a thinking-level selector only for models whose adapter *declares*
+`reasoning.efforts` on `resolveModel()`. Without a declaration the harness has
+nothing to offer, rejects any explicit effort before provider I/O, and the
+adapter falls back to its own default — which, with pi-ai's openrouter thinking
+format, used to be an explicit `{"reasoning":{"effort":"none"}}` that turned
+thinking off on every reasoning model.
+
+The adapter now translates Kilo's capability list into that contract:
+
+- any model whose `supported_parameters` include `reasoning`,
+  `include_reasoning`, or `reasoning_effort` advertises the full pi-ai scale —
+  `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (307 of the live catalog's
+  401 records qualify, every free-lane model among them);
+- no `defaultEffort` is pinned: measured on `qwen/qwen3.8-27b:free`, omitting the
+  level sends no `reasoning` field and the provider then spends the *strongest*
+  tier it offers, so pinning a lower level would silently make every session
+  think less than the model would on its own;
+- `thinkingLevelMap: { off: null, xhigh: 'xhigh', max: 'max' }` makes an omitted
+  effort send *no* reasoning field instead of `"none"`, and keeps pi-ai from
+  clamping the two high tiers down to `high`.
+
+Measured effort→wire behaviour on the live gateway (`qwen/qwen3.8-27b:free`,
+reasoning tokens for one step-by-step prompt): `none` 0, `minimal`/`low` 399,
+`medium`/`high` 429, `xhigh`/`max` 499, no field 499. `xhigh` and `max` answered
+200 on every other free model probed too (`stepfun/step-3.7-flash:free`,
+`nvidia/nemotron-3-super-120b-a12b:free`, `apodex/apodex-1.1-mini:free`,
+`dots-studio/dots-3-note-preview:free`), so all six levels are offered instead of
+stopping where OpenRouter's documented scale does.
+
+The level list lives in `packages/plugin/src/adapter/catalog.ts`
+(`KILO_REASONING_EFFORTS`).
+
+Note that pi-ai's own `reasoningEfforts` settings editor and the third-party
+thinking-level slider plugin (`dsh-better-reasoning-effort`) are hard-wired to
+the `llm-pi-ai` settings namespace, so they only manage models declared under
+`llm-pi-ai`. Dynamic adapter providers such as this one have no settings
+namespace; their levels come from this declaration and are edited through the
+official model selector.
 
 For Zen, the public model directory currently contains minimal OpenAI records,
 so the adapter accepts the documented `big-pickle` exception and IDs ending in

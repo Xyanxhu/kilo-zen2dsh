@@ -9,8 +9,10 @@ import {
   ModelCatalog,
   modelInfo,
   type KiloModel,
+  type KiloModelInfo,
 } from './catalog.ts'
-import { toStreamChunks, type HarnessChunk, type PiEvent } from './events.ts'
+import { toStreamChunks, CONTEXT_WINDOW_EXCEEDED, type HarnessChunk, type PiEvent } from './events.ts'
+import { estimateRequestTokens, blendCalibration, overflowMessage, resolveWireBudget } from './budget.ts'
 import { deriveRequestIDs, kiloHeaders, kiloUserAgent, type RequestIDs } from './ids.ts'
 import {
   toPiContext,
@@ -18,6 +20,20 @@ import {
   type AttachmentStore,
   type HarnessGenerateOptions,
 } from './messages.ts'
+
+/**
+ * Structural mirror of dsh-llm's `LlmModelReasoningInfo`, which the harness
+ * reads off `resolveModel()` to populate thinking-level selectors. Declared
+ * locally because this plugin deliberately keeps no dependency on the harness
+ * packages; the registry validates the shape (non-empty ids and names, unique
+ * ids, a known `defaultEffort`) when the adapter is registered.
+ */
+export interface LlmModelReasoningInfo {
+  /** Supported efforts in adapter-preferred display order. */
+  efforts: ReadonlyArray<{ id: string; name: string; description?: string }>
+  /** Effort the harness materializes into a request when the caller omits one. */
+  defaultEffort?: string
+}
 
 /** Provider id shown in the DSH model picker. */
 export const PROVIDER_ID = 'kilo2dsh'
@@ -142,6 +158,40 @@ function thinkingLevel(value: unknown): ThinkingLevel | undefined {
   return undefined
 }
 
+/**
+ * Human-readable labels for the effort ids a Kilo reasoning model offers. DSH
+ * shows these names in selectors and diagnostics, so the id (what dispatch
+ * sends) and the name (what the user reads) both live here.
+ */
+const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max',
+}
+
+/**
+ * Translate catalog reasoning metadata into the dsh-llm contract.
+ *
+ * Without this the harness has no levels to offer for adapter-owned models: no
+ * selector appears, and every request dispatches with whatever the adapter
+ * defaults to — which, before `modelToPiModel` gained
+ * `thinkingLevelMap: { off: null }`, was an explicit `{"effort":"none"}` that
+ * disabled thinking on reasoning models.
+ */
+function reasoningInfo(
+  info: Pick<KiloModelInfo, 'reasoning' | 'reasoningEfforts' | 'defaultReasoningEffort'>,
+): LlmModelReasoningInfo | undefined {
+  if (!info.reasoning || !Array.isArray(info.reasoningEfforts) || info.reasoningEfforts.length === 0) return undefined
+  type EffortId = LlmModelReasoningInfo['efforts'][number]['id']
+  const efforts = info.reasoningEfforts.map((id) => ({ id: id as EffortId, name: REASONING_EFFORT_LABELS[id] ?? id }))
+  const preferred = info.defaultReasoningEffort
+  if (preferred === undefined || !efforts.some((effort) => effort.id === preferred)) return { efforts }
+  return { efforts, defaultEffort: preferred as EffortId }
+}
+
 function modelToPiModel(
   model: KiloModel,
   providerId: string,
@@ -166,6 +216,15 @@ function modelToPiModel(
     // `/responses` based on the selected API.
     baseUrl: gatewayBaseUrl.replace(/\/+$/, ''),
     reasoning: info.reasoning,
+    // pi-ai treats `off: null` as "this model has no explicit off wire value",
+    // so an omitted effort sends no reasoning field at all and the provider
+    // keeps its own default. Without it pi-ai's openrouter format emits
+    // `{"effort":"none"}` whenever no level is selected, which silently disabled
+    // thinking on every reasoning model (and, until reasoning metadata was
+    // declared, no level could ever be selected). `xhigh`/`max` are mapped to
+    // themselves because pi-ai only counts a level as available when the map
+    // declares it; otherwise it clamps them down to `high`.
+    ...(info.reasoning ? { thinkingLevelMap: { off: null, xhigh: 'xhigh', max: 'max' } } : {}),
     // pi-ai gates inline image parts on `input` including "image"; keep it in
     // sync with the modalities the gateway actually declares for this model.
     input: info.inputModalities,
@@ -246,6 +305,12 @@ export class KiloAdapter {
   readonly #options: KiloAdapterOptions
   readonly #apiResolver: (model: KiloModel) => Api
   readonly #maxOutputTokens: number | null
+  /**
+   * Per-model ratio of gateway-reported input tokens to this adapter's raw
+   * prompt estimate. Absent means "use the raw, deliberately conservative
+   * estimate"; every successful request refines it.
+   */
+  readonly #calibration = new Map<string, number>()
   /** Vision ids for metadata-less directories; undefined means no overrides. */
   readonly #visionOverrides: ReadonlySet<string> | undefined
   /**
@@ -318,6 +383,9 @@ export class KiloAdapter {
       const info = detail
         ? modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens, visionOverrides: this.#visionOverrides })
         : { id, name: id, description: undefined, inputModalities: this.#visionOverrides?.has(id) ? ['text', 'image'] : ['text'] }
+      // Reasoning metadata is not part of the list contract (dsh-llm keeps only
+      // identity, description, and modalities here); callers that need the
+      // selectable efforts resolve the model, which is where DSH validates them.
       models.push({
         provider,
         id,
@@ -337,6 +405,7 @@ export class KiloAdapter {
     inputModalities: string[]
     context: { contextWindow: number }
     defaultMaxTokens: number
+    reasoning?: LlmModelReasoningInfo
   } {
     const detail = this.#catalog.get?.(model)
     const info = detail
@@ -350,6 +419,7 @@ export class KiloAdapter {
           },
           { gatewayMaxOutputTokens: this.#maxOutputTokens, visionOverrides: this.#visionOverrides },
         )
+    const reasoning = reasoningInfo(info)
     return {
       provider,
       id: model,
@@ -358,6 +428,7 @@ export class KiloAdapter {
       inputModalities: info.inputModalities,
       context: { contextWindow: numeric(info.contextWindow, DEFAULT_CONTEXT_WINDOW) },
       defaultMaxTokens: numeric(info.maxTokens, DEFAULT_MAX_TOKENS),
+      ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
 
@@ -381,6 +452,38 @@ export class KiloAdapter {
     const ids = deriveRequestIDs(options.messages, this.#options.projectNamespace ?? 'kilo2dsh:default-project')
     const detail = this.#catalog.get?.(modelId) ?? fallbackModel(modelId)
     const info = modelInfo(detail, { gatewayMaxOutputTokens: this.#maxOutputTokens, visionOverrides: this.#visionOverrides })
+    // A gateway's advertised output cap is a per-request maximum, while the
+    // harness reserves whatever the adapter declares for every request. Clamp
+    // the budget we actually send against this prompt so input + answer can
+    // never exceed the window the gateway enforces. The raw estimate is scaled
+    // by this route's calibration factor, learned from the gateway's own usage
+    // reports, so a systematic estimator bias cannot eat the answer budget.
+    const rawInputTokens = estimateRequestTokens(options)
+    const budget = resolveWireBudget({
+      requested: options.maxTokens,
+      modelMaxTokens: info.maxTokens,
+      contextWindow: info.contextWindow,
+      estimatedInputTokens: rawInputTokens,
+      calibration: this.#calibration.get(modelId),
+    })
+    if (budget.overflow) {
+      // Nothing fits: report the failure shape pi-ai's overflow classifier
+      // produces so dsh-llm routes it to context-overflow compaction instead of
+      // spending a request the gateway is guaranteed to reject.
+      yield { type: 'usage', usage: { inputTokens: budget.effectiveInputTokens, outputTokens: 0 } }
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            message: overflowMessage(budget.effectiveInputTokens, info.contextWindow),
+            code: CONTEXT_WINDOW_EXCEEDED,
+          },
+        },
+      }
+      return
+    }
+    const wireMaxTokens = budget.maxTokens ?? clampMaxTokens(options.maxTokens, info.maxTokens)
     const baseHeaders = requestHeaders(ids, this.#options, options.mode)
     const headers: ProviderHeaders = { ...baseHeaders }
     if (!this.#apiKey) {
@@ -405,15 +508,27 @@ export class KiloAdapter {
       signal: options.signal,
       maxRetries: 0,
       temperature: options.temperature,
-      maxTokens: clampMaxTokens(options.maxTokens, info.maxTokens),
+      maxTokens: wireMaxTokens,
       reasoning: thinkingLevel(options.reasoningEffort),
       onPayload: (payload) => {
-        const clamped = clampPayloadMaxTokens(payload, info.maxTokens)
+        const clamped = clampPayloadMaxTokens(payload, wireMaxTokens ?? info.maxTokens)
         const record = (clamped ?? payload) as Record<string, unknown>
         return this.#options.payloadDecorator ? this.#options.payloadDecorator(record) : record
       },
     })
-    yield* toStreamChunks(events as unknown as AsyncIterable<PiEvent>, model.contextWindow)
+    // Forward the stream while watching for the gateway's own usage report: the
+    // real input count against our raw estimate is the calibration sample that
+    // keeps future budgets honest.
+    let reportedInputTokens: number | undefined
+    let failed = false
+    for await (const chunk of toStreamChunks(events as unknown as AsyncIterable<PiEvent>, model.contextWindow)) {
+      if (chunk.type === 'usage' && chunk.usage.inputTokens > 0) reportedInputTokens = chunk.usage.inputTokens
+      if (chunk.type === 'finish' && chunk.reason.kind === 'error') failed = true
+      yield chunk
+    }
+    if (!failed && reportedInputTokens !== undefined && rawInputTokens > 0) {
+      this.#calibration.set(modelId, blendCalibration(this.#calibration.get(modelId), reportedInputTokens / rawInputTokens))
+    }
   }
 
   catalogStatus(): { total: number; exposed: number } {

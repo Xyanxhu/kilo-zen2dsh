@@ -4,6 +4,7 @@ import { createServer } from 'node:http'
 import { once } from 'node:events'
 
 import { ZenAdapter, ZEN_PROVIDER_ID, decorateZenPayload, zenModelApi } from '../src/adapter/zen-adapter.ts'
+import { KiloAdapter } from '../src/adapter/kilo-adapter.ts'
 
 test('ZenAdapter keeps the OpenCode provider surface and defaults', () => {
   const adapter = new ZenAdapter({
@@ -23,12 +24,16 @@ test('ZenAdapter keeps the OpenCode provider surface and defaults', () => {
 
 test('ZenAdapter does not inherit Kilo gateway output ceiling', () => {
   const model = 'large-zen-model'
-  const adapter = new ZenAdapter({
+  const catalog = {
     list: () => [model],
     decision: () => ({ allowed: true, source: 'catalog_free', known: true }),
-    get: () => ({ id: model, context_length: 1_048_576, max_completion_tokens: 943_718 }),
-  })
+    get: () => ({ id: model, context_length: 4_194_304, max_completion_tokens: 943_718 }),
+  }
+  const adapter = new ZenAdapter(catalog)
+  // The window share is a harness rule and applies to both lanes; the
+  // Kilo-specific 524,288 compatibility ceiling is not inherited by Zen.
   assert.equal(adapter.resolveModel(ZEN_PROVIDER_ID, model).defaultMaxTokens, 943_718)
+  assert.equal(new KiloAdapter(catalog).resolveModel('kilo2dsh', model).defaultMaxTokens, 524_288)
 })
 
 test('decorateZenPayload fills the five core agent tool shells the free tier requires', () => {

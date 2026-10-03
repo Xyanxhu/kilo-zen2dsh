@@ -108,11 +108,44 @@ Zen 请求附带 `x-opencode-client: cli`、session/request/project 关联头和
 
 Kilo 的 live `/models` 元数据是动态的，且不同上游可能把上下文/输出限制放在
 顶层、`top_provider` 或 `limit(s)` 中。`modelInfo()` 将兼容字段归一化，取最小
-正数上下文限制；输出预算再与上下文窗口和当前网关兼容上限取最小值。对于
-MiniMax-M3 免费记录，目录曾报告 943,718 个输出 token，而实际后端上限为
-524,288，因此 Kilo 的 `resolveModel().defaultMaxTokens` 和最终 OpenAI payload 都
-会自动下调到安全值。输入上下文窗口仍按目录能力保留，不把输出兼容上限误当成
-输入窗口；Zen adapter 不继承这个 Kilo 专用上限。
+正数上下文限制；输出预算再与上下文窗口、当前网关兼容上限，以及窗口的 25% 取最
+小值。对于 MiniMax-M3 免费记录，目录曾报告 943,718 个输出 token，而实际后端上限
+为 524,288，因此 Kilo 的 `resolveModel().defaultMaxTokens` 和最终 OpenAI payload
+都会自动下调到安全值。输入上下文窗口仍按目录能力保留，不把输出兼容上限误当成输
+入窗口；Zen adapter 不继承这个 Kilo 专用上限。
+
+窗口份额（`adapter/budget.ts`）解决的是另一类不一致：网关报的
+`max_completion_tokens` 是单次请求上限，而 DSH 把它当作每次请求都要预留的输出预
+算。免费线路按 OpenRouter 习惯报出窗口的 90%（`qwen/qwen3.8-27b:free`：235,929 /
+262,144），会让请求的 input + output 必然超窗（网关 400），并让
+compaction-basic 的 `contextWindow - maxTokens - headroomTokens` 变成负数而失去压
+力预算。因此声明预算按窗口缩放，`stream()` 再按 prompt 估算收敛 `max_tokens`；连
+最小回答（2,048，仅作"判定无解"门槛）都放不下时直接返回
+`CONTEXT_WINDOW_EXCEEDED`，交给 DSH 的溢出压缩路径。
+
+估算本身按字符类别计价（字母/空格 4.3 字符/token，数字与标点 2.2，宽字符约 1），
+并用 `prompt_tokens` 反馈做逐模型校准（EMA，α=0.3，钳到 [0.5, 1.0]，永不偏乐观）。
+理由有实测支撑：一个 1.61 MB 的散文型会话被网关计为 247,790 输入 token，旧"字节
+÷ 3"估成 286,087（+15%），在 262,144 窗口上把约 9K 的真实回答空间算成负数而误报溢
+出；反过来 pi-ai 内置的收敛一律按 4 字符/token，对 JSON/工具负载偏乐观，密集内容
+仍需 adapter 自己兜住。
+
+思考等级同理，属于"适配器必须主动声明"的能力：`dsh-llm` 只把
+`resolveModel()` 返回的 `reasoning.efforts` 当作可选档位（校验 id/name 非空、id 不重
+复、`defaultEffort` 必须属于其中之一），未声明时 harness 会在发请求前以
+`UNSUPPORTED_REASONING_EFFORT` 拒绝任何显式等级。此前 adapter 不声明，于是官方模型
+选择器对 kilo2dsh 模型没有任何档位；同时 pi-ai 的 openrouter 思考格式在"没有等
+级"时会发 `{"reasoning":{"effort":"none"}}`，把推理模型的思考静默关掉。现在按目录
+的 `supported_parameters`（`reasoning` / `include_reasoning` / `reasoning_effort`）
+声明 pi-ai 全量六档（minimal/low/medium/high/xhigh/max），不固定 `defaultEffort`
+—— 实测网关在"不发字段"时给的是最强档位（499 reasoning tokens，与 xhigh/max 相同），
+固定成低档只会让每次会话少思考；并用
+`thinkingLevelMap: { off: null, xhigh: 'xhigh', max: 'max' }`：既让"未指定"变成"不发
+字段、用 provider 默认"（而不是发成关闭），也避免 pi-ai 因未声明而把 xhigh/max 收敛
+到 high。档位是否真实存在按网关实测判定（27B：minimal/low 399、medium/high 429、
+xhigh/max 499；另外 4 个免费模型对 xhigh/max 均 200），而不是照 OpenRouter 文档刻度
+砍档。pi-ai 自带的 `reasoningEfforts` 编辑面板与第三方滑块插件都绑定在
+`llm-pi-ai` 命名空间上，动态适配器 provider 没有该命名空间，故不能复用。
 
 ## 6. 生命周期与缓存
 

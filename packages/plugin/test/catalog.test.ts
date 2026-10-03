@@ -24,6 +24,7 @@ import {
   staticFreeModels,
   zenStaticFreeModels,
 } from '../src/adapter/catalog.ts'
+import { outputCeilingForWindow } from '../src/adapter/budget.ts'
 
 function price(input?: number, output?: number, deprecated = false, free?: boolean) {
   return { input, output, deprecated, ...(free === undefined ? {} : { free }) }
@@ -73,7 +74,10 @@ test('modelInfo merges nested context metadata and caps an over-advertised outpu
     isFree: true,
   })
   assert.equal(info.contextWindow, 1_048_576)
-  assert.equal(info.maxTokens, KILO_GATEWAY_MAX_OUTPUT_TOKENS)
+  // Both the gateway ceiling and the window share bound this declaration; the
+  // smaller of the two is what the harness reserves per request.
+  assert.equal(outputCeilingForWindow(1_048_576) < KILO_GATEWAY_MAX_OUTPUT_TOKENS, true)
+  assert.equal(info.maxTokens, outputCeilingForWindow(1_048_576))
 })
 
 test('modelInfo surfaces a catalog description and maps modalities to text/image', () => {
@@ -108,7 +112,34 @@ test('modelInfo can disable or override a gateway compatibility ceiling', () => 
     max_completion_tokens: 943_718,
   }
   assert.equal(modelInfo(model, { gatewayMaxOutputTokens: 100_000 }).maxTokens, 100_000)
-  assert.equal(modelInfo(model, { gatewayMaxOutputTokens: null }).maxTokens, 943_718)
+  // Disabling the Kilo ceiling still leaves the context-window share in place:
+  // a router's per-request cap is not a budget the harness can reserve.
+  assert.equal(modelInfo(model, { gatewayMaxOutputTokens: null }).maxTokens, outputCeilingForWindow(1_048_576))
+  assert.equal(modelInfo(model, { gatewayMaxOutputTokens: null }).maxTokens, 262_144)
+})
+
+test('modelInfo never advertises an output budget that fills the context window', () => {
+  // Kilo's live free lane: qwen/qwen3.8-27b:free advertises 235929 of a 262144
+  // window (90%), which made DSH reserve a window-filling answer budget on every
+  // request and left compaction-basic without a pressure budget.
+  const qwen = {
+    id: 'qwen/qwen3.8-27b:free',
+    isFree: true,
+    context_length: 262_144,
+    top_provider: { context_length: 262_144, max_completion_tokens: 235_929 },
+  }
+  assert.equal(modelInfo(qwen).contextWindow, 262_144)
+  assert.equal(modelInfo(qwen).maxTokens, 65_536)
+
+  // A model that advertises output = context (stepfun/step-3.7-flash:free).
+  const step = { id: 'stepfun/step-3.7-flash:free', context_length: 262_144, max_completion_tokens: 262_144 }
+  assert.equal(modelInfo(step).maxTokens, 65_536)
+
+  // Saner declarations are left exactly as advertised.
+  assert.equal(modelInfo({ id: 'sane', context_length: 262_144, max_completion_tokens: 32_768 }).maxTokens, 32_768)
+  assert.equal(modelInfo({ id: 'default', context_length: 262_144 }).maxTokens, 32_768)
+  // Small windows scale down instead of overflowing.
+  assert.equal(modelInfo({ id: 'tiny', context_length: 8_192, max_completion_tokens: 8_192 }).maxTokens, 2_048)
 })
 
 test('compatibility decoder accepts a Kilo response and preserves costs', () => {

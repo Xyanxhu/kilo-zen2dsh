@@ -85,6 +85,7 @@ dsh plugin --profile web add ./huanx-kilo-zen2dsh-0.4.0.tgz
 | `gatewayBaseUrl` | `https://api.kilo.ai/api/gateway` | Kilo 兼容网关地址。 |
 | `refreshSeconds` | `300` | 模型目录刷新间隔（秒）。 |
 | `requireTools` | `true` | 是否隐藏未声明 `tools` 的免费模型。 |
+| `maxOutputTokens` | `524288` | Kilo 网关兼容输出上限；`null` 关闭该上限。逐模型输出预算由窗口自动推导，无需配置。 |
 | `upstreamApiKeyEnv` | 空 | 显式指定后才从该环境变量读取 Kilo Token。 |
 | `anonymousKey` | 空 | Kilo 私有兼容网关的可选 Token；为空则不发送鉴权头。 |
 | `zenEnabled` | `true` | adapter 模式下是否注册 OpenCode Zen。 |
@@ -138,6 +139,73 @@ adapter 会合并这些声明并取所有正数限制中的最小值作为有效
 小的限制优先）。即使 DSH 传入过大的默认值，也会自动下调，无需手工改模型配置；
 同时保留目录声明的 1M 输入上下文窗口，避免因为这个错误把可用上下文一并缩小。
 这个兼容上限只用于 Kilo；OpenCode Zen 仍使用自己的目录限制。
+
+### 输出预算按窗口自动缩放
+
+网关报的 `max_completion_tokens` 是"单次请求的输出上限"，而 DSH 把
+`defaultMaxTokens` 当成"每次请求都要预留的输出预算"，两者语义并不相同。Kilo 免费
+线路按 OpenRouter 习惯把上限报成上下文窗口的 90%，于是同时踩两个坑：
+
+- 请求里要的输出和整个剩余窗口一样大，prompt + output 必然超窗，网关直接 400：
+  `requested about 262507 tokens ... maximum context length is 262144`；
+- 压缩插件预留同样多的 token，`contextWindow - maxTokens - headroomTokens <= 0`
+  导致它算不出压力阈值，自动压缩在该生效时反而不生效。
+
+所以 adapter 自己翻译这个数字，无需任何配置：
+
+1. **声明预算按窗口缩放**：`defaultMaxTokens` 不超过窗口的 25%（模型更小的声明优
+   先）。`qwen/qwen3.8-27b:free` 于是从 235,929 变成 65,536，为 prompt 留下
+   196,608 的输入预算和 131,072 的压缩压力预算；`stepfun/step-3.7-flash:free`
+   这类"输出等于窗口"的声明同样被收敛。
+2. **每次请求再按 prompt 实测收敛**：发请求前按字符类别估算输入 token（ASCII 字母
+   和空格约 4.3 字符/token，数字与标点约 2.2，中日韩等宽字符约 1 字符/token，图片
+   按固定值计），`max_tokens` 收敛到 `窗口 - 输入估算 - 安全余量`，保证
+   input + output 永远进得去。pi-ai 自己也有类似收敛，但它一律按"4 字符/token"算，
+   对 JSON 和工具负载偏乐观——这类内容靠 adapter 的估算兜住。
+3. **估算会跟着网关自校准**：每次成功响应都带网关自己的 `prompt_tokens`，adapter 把
+   这个比值折进逐模型的校准因子（指数滑动平均，上限钳到 1.0，永不偏乐观）。单一常数
+   无法同时贴合散文和 JSON：散文会话曾被高估约 15%（悄悄吃掉输出预算，甚至在会话占用
+   94% 时误报溢出），而"4 字符/token"又会低估密集 JSON。
+4. **实在放不下时报可识别的溢出错误**：若连最小回答都放不下，adapter 不发出注定失败
+   的请求，而是返回 `CONTEXT_WINDOW_EXCEEDED`（用 pi-ai / dsh-llm 都认识的溢出措辞
+   外加可操作建议：压缩本会话、换更大窗口的模型、或新开会话），让 DSH 走上下文溢出
+   压缩并重试。注意 2,048 只是"判定无解"的门槛，不是输出上限：真正发出的预算是
+   `窗口 - prompt - 安全余量`。
+
+需要全局改写网关兼容上限时才有配置项：`maxOutputTokens`（默认 524,288，`null` 关
+闭该兼容上限）。逐模型无需配置。
+
+### 思考等级来自目录声明
+
+DSH 只为"适配器在 `resolveModel()` 里声明了 `reasoning.efforts`"的模型显示思考等级
+选择器。没有声明时，harness 无档可选、任何显式等级都会在发出请求前被拒，adapter 只
+能用自己的默认值；而在 pi-ai 的 openrouter 思考格式下，这个默认值曾是显式的
+`{"reasoning":{"effort":"none"}}`——等于把所有推理模型的思考关掉。
+
+现在 adapter 把 Kilo 的能力表翻译成该契约：
+
+- `supported_parameters` 里含 `reasoning`、`include_reasoning` 或
+  `reasoning_effort` 的模型提供 pi-ai 的完整档位：`minimal`、`low`、`medium`、
+  `high`、`xhigh`、`max`（实时目录 401 条里有 307 条符合，免费线路全覆盖）；
+- 不固定 `defaultEffort`：实测 `qwen/qwen3.8-27b:free` 在不发 reasoning 字段时用的是
+  它自己能给的**最强档位**，固定成更低档等于每次会话都少思考；
+- `thinkingLevelMap: { off: null, xhigh: 'xhigh', max: 'max' }`：让"未指定等级"时
+  **完全不发** reasoning 字段（而不是发成 `"none"` 关闭），同时避免 pi-ai 把 `xhigh`/
+  `max` 收敛到 `high`。
+
+实测档位梯度（同一道分步计算题，`qwen/qwen3.8-27b:free` 的 reasoning tokens）：
+`none` 0、`minimal`/`low` 399、`medium`/`high` 429、`xhigh`/`max` 499、不发字段 499；
+另外 4 个免费模型（`stepfun/step-3.7-flash:free`、
+`nvidia/nemotron-3-super-120b-a12b:free`、`apodex/apodex-1.1-mini:free`、
+`dots-studio/dots-3-note-preview:free`）对 `xhigh`/`max` 同样返回 200，所以给出全部
+六档，而不是停在 OpenRouter 文档刻度上的 `high`。
+
+档位列表在 `packages/plugin/src/adapter/catalog.ts`（`KILO_REASONING_EFFORTS`）。
+
+注意：pi-ai 自带的 `reasoningEfforts` 设置面板和第三方思考等级滑块插件
+（`dsh-better-reasoning-effort`）都写死了 `llm-pi-ai` 设置命名空间，只能管理声明在
+`llm-pi-ai` 下的模型；本插件这类动态适配器 provider 没有设置命名空间，等级来自上面
+的声明，并通过官方模型选择器调整。
 
 Zen 的公开 `/v1/models` 记录目前只有最小 OpenAI 字段，实时目录成功后会替换
 源码内的 bootstrap 列表；目录不可用时会使用独立的 Zen 缓存和静态列表。

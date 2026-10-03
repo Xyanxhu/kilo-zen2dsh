@@ -1,6 +1,8 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
+import { outputCeilingForWindow } from './budget.ts'
+
 /**
  * Kilo's public OpenAI-compatible gateway.  The gateway deliberately keeps
  * the model directory separate from the chat endpoint: `/models` is public,
@@ -149,6 +151,15 @@ export interface KiloModelInfo {
   maxTokens: number
   inputModalities: string[]
   reasoning: boolean
+  /**
+   * Selectable reasoning-effort ids for this model, in display order, or
+   * undefined when the catalog advertises no reasoning control at all. DSH only
+   * offers the levels an adapter declares here, and it rejects an undeclared
+   * effort before provider I/O, so this list doubles as the accepted set.
+   */
+  reasoningEfforts?: string[]
+  /** Effort DSH materializes into a request when the caller omits one. */
+  defaultReasoningEffort?: string
   supportsTools: boolean
 }
 
@@ -318,6 +329,39 @@ function supportsTools(model: KiloModel): boolean {
   return !Array.isArray(parameters) || parameters.length === 0 || parameters.some((parameter) => String(parameter).trim().toLowerCase() === 'tools')
 }
 
+/**
+ * Reasoning-effort ids every reasoning-capable Kilo model is offered.
+ *
+ * OpenRouter-flavoured gateways accept the nested `reasoning: { effort }`
+ * object that pi-ai's `openrouter` thinking format emits. Measured against the
+ * live gateway on `qwen/qwen3.8-27b:free` (reasoning tokens for one step-by-step
+ * prompt): `minimal`/`low` 399, `medium`/`high` 429, `xhigh`/`max` 499, so the
+ * high tiers are real and distinct rather than aliases of `high`. `xhigh` and
+ * `max` also answered 200 on every other free model probed
+ * (`stepfun/step-3.7-flash:free`, `nvidia/nemotron-3-super-120b-a12b:free`,
+ * `apodex/apodex-1.1-mini:free`, `dots-studio/dots-3-note-preview:free`), so
+ * the full pi-ai scale is offered.
+ */
+const KILO_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/**
+ * Whether this record advertises any reasoning control.
+ *
+ * `supported_parameters` mirrors OpenRouter's capability list: `reasoning` and
+ * `include_reasoning` mean the nested reasoning object is accepted, and
+ * `reasoning_effort` additionally means the OpenAI-style scalar is accepted.
+ * 307 of the live catalog's 401 records list at least one of them, including
+ * every free-lane model.
+ */
+function supportsReasoning(model: KiloModel): boolean {
+  const parameters = model.supported_parameters
+  if (!Array.isArray(parameters)) return false
+  return parameters.some((parameter) => {
+    const name = String(parameter).trim().toLowerCase()
+    return name === 'reasoning' || name === 'include_reasoning' || name === 'reasoning_effort'
+  })
+}
+
 function normalizeModel(raw: unknown): KiloModel | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const candidate = raw as Record<string, unknown>
@@ -448,12 +492,15 @@ export function modelInfo(model: KiloModel, options: ModelInfoOptions = {}): Kil
     'output',
   ])
   const advertisedMax = outputLimits.length > 0 ? Math.min(...outputLimits) : DEFAULT_MAX_TOKENS
-  // The output budget can never exceed either the combined context or the
-  // selected gateway's compatibility ceiling. This is also what DSH uses as
-  // `defaultMaxTokens`, so an agent-loop default cannot reintroduce an unsafe
-  // value after resolution.
+  // The output budget can never exceed the combined context, the selected
+  // gateway's compatibility ceiling, or the share of the window the harness can
+  // afford to reserve on every request. This is what DSH materializes as
+  // `defaultMaxTokens` and what compaction-basic reserves before it can derive a
+  // pressure threshold, so a directory advertising "output = 90% of the window"
+  // (Kilo's free lane does) is translated here instead of passed through — see
+  // adapter/budget.ts.
   const gatewayMax = normalizedGatewayMaxOutputTokens(options.gatewayMaxOutputTokens) ?? Number.MAX_SAFE_INTEGER
-  const maxTokens = Math.min(advertisedMax, contextWindow, gatewayMax)
+  const maxTokens = Math.min(advertisedMax, contextWindow, gatewayMax, outputCeilingForWindow(contextWindow))
   const declaredInput = Array.isArray(model.architecture?.input_modalities)
     ? model.architecture!.input_modalities!.map(String).filter(Boolean)
     : ['text']
@@ -465,6 +512,7 @@ export function modelInfo(model: KiloModel, options: ModelInfoOptions = {}): Kil
   const inputModalities = declaredInput.filter((modality) => modality === 'text' || modality === 'image')
   if (inputModalities.length === 0) inputModalities.push('text')
   if (options.visionOverrides?.has(model.id) && !inputModalities.includes('image')) inputModalities.push('image')
+  const reasoning = supportsReasoning(model)
   return {
     id: model.id,
     name: typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id,
@@ -472,7 +520,13 @@ export function modelInfo(model: KiloModel, options: ModelInfoOptions = {}): Kil
     contextWindow,
     maxTokens,
     inputModalities,
-    reasoning: Array.isArray(model.supported_parameters) && model.supported_parameters.includes('reasoning'),
+    reasoning,
+    // No defaultEffort on purpose: leaving the choice to the provider measured
+    // the *strongest* observed tier (499 reasoning tokens, equal to `xhigh` and
+    // `max`), so pinning a lower level would silently make every session think
+    // less than the model would on its own. The selector shows "provider
+    // default" until a level is chosen.
+    ...(reasoning ? { reasoningEfforts: [...KILO_REASONING_EFFORTS] } : {}),
     supportsTools: supportsTools(model),
   }
 }

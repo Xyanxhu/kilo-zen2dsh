@@ -56,7 +56,8 @@ export interface PiDoneMessage {
   [key: string]: unknown
 }
 
-const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
+/** Harness failure code for a request that cannot fit the model's window. */
+export const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
 const EMPTY_RESPONSE = 'EMPTY_RESPONSE'
 const QUOTA_EXCEEDED = 'QUOTA_EXCEEDED'
 

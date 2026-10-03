@@ -95,6 +95,13 @@ DSH 会在 adapter 调用前把 `resolveModel().defaultMaxTokens` 物化到生�
 `ZenModelCatalog`/`ZenAdapter` 将该 Kilo 专用上限设为关闭，继续尊重 Zen 自己的
 模型能力声明。
 
+声明预算还受窗口份额约束（`MAX_OUTPUT_WINDOW_SHARE = 0.25`）：网关的单次请求上限
+不是每次请求都能预留的预算。`stream()` 在发请求前用 `estimateRequestTokens()`
+估算 prompt 并调用 `resolveWireBudget()`，把 `max_tokens` 收敛到
+`窗口 - 输入估算 - 安全余量`；若连 `MIN_ANSWER_TOKENS` 都放不下，则不发请求，直接
+产出 `CONTEXT_WINDOW_EXCEEDED` 结束块（措辞同时匹配 pi-ai 与 dsh-llm 的溢出判定，
+使 DSH 自动进入上下文溢出压缩）。
+
 ## 请求头和消息
 
 每个 provider 都从首个用户 turn 派生稳定 session/project ID，并生成随机 request
