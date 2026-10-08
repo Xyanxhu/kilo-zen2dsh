@@ -51,7 +51,7 @@ dsh plugin --profile web add @huanx/kilo-zen2dsh
 cd packages/plugin
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./huanx-kilo-zen2dsh-0.4.5.tgz
+dsh plugin --profile web add ./huanx-kilo-zen2dsh-0.4.6.tgz
 ```
 
 重启 `dsh web`，打开模型选择器，在 `kilo2dsh`（Kilo）或 `opencode2dsh`
