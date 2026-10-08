@@ -115,6 +115,7 @@ test('ZenAdapter streams through /zen/v1 with public auth and compatibility head
     assert.match(String(seenHeaders['user-agent']), /^opencode\//)
     // The free tier's agent shape: canonical session id and the core tools.
     assert.match(String(seenHeaders['x-opencode-session']), /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+    assert.equal(seenHeaders['x-opencode-session-id'], seenHeaders['x-opencode-session'])
     assert.ok(seenHeaders['x-opencode-request'])
     assert.deepEqual(
       seenBody?.tools?.map((tool) => tool.function.name),

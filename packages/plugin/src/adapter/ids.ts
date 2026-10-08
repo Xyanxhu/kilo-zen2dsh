@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 
 import { KILO_USER_AGENT } from './catalog.ts'
+import { opencodeUserAgent } from './opencode-identity.ts'
 
 /** Correlation identifiers used by Kilo's task/project headers. */
 export interface RequestIDs {
@@ -77,16 +78,7 @@ export function canonicalZenSessionId(seed: string): string {
   return `ses_${digest.subarray(0, 6).toString('hex')}${tail}`
 }
 
-/**
- * OpenCode-compatible user agent used only by the optional Zen free lane.
- * Zen currently gates anonymous free requests on this marker; keep the
- * version override explicit so users can update it without rebuilding.
- * Observed behavior: https://github.com/anomalyco/opencode/issues/42500
- */
-export function opencodeUserAgent(): string {
-  const version = process.env.OPENCODE2DSH_VERSION?.trim() || '1.18.31'
-  return `opencode/${version} (${process.platform} ${process.arch}; node${process.versions.node})`
-}
+export { opencodeUserAgent } from './opencode-identity.ts'
 
 export interface KiloHeaderOptions {
   userAgent?: string
@@ -122,15 +114,24 @@ export function opencodeHeaders(ids: RequestIDs, options: OpenCodeHeaderOptions 
   // The free tier validates the canonical ses_ shape; non-canonical values
   // (older adapters, arbitrary session ids) would be rejected with 403.
   const session = canonicalZenSessionId(ids.session)
-  return {
+  const headers: Record<string, string> = {
     'user-agent': options.userAgent ?? opencodeUserAgent(),
     'x-opencode-client': options.client ?? 'cli',
     'x-opencode-session': session,
+    // CLI 1.18.34+ sends the namespaced session identity alongside the
+    // legacy correlation pair; Zen forwards it to the new inference service.
+    'x-opencode-session-id': session,
     'x-session-affinity': session,
     'X-Session-Id': session,
     'x-opencode-request': ids.request,
     'x-opencode-project': ids.project,
   }
+  if (ids.parentSession) {
+    const parent = canonicalZenSessionId(ids.parentSession)
+    headers['x-opencode-parent-session-id'] = parent
+    headers['x-parent-session-id'] = parent
+  }
+  return headers
 }
 
 /** Compatibility spelling retained for downstream users of opencode2dsh. */

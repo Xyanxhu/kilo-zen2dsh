@@ -86,11 +86,32 @@ test('opencodeHeaders carries Zen compatibility identifiers independently', () =
   // The free tier validates the canonical ses_ shape (12 hex + 14 Base62),
   // so the header never carries the raw stableID spelling.
   assert.match(String(headers['x-opencode-session']), /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+  // CLI 1.18.34+ sends the namespaced identity alongside the legacy pair.
+  assert.equal(headers['x-opencode-session-id'], headers['x-opencode-session'])
   assert.equal(headers['x-session-affinity'], headers['x-opencode-session'])
   assert.equal(headers['X-Session-Id'], headers['x-opencode-session'])
   assert.equal(headers['x-opencode-request'], ids.request)
   assert.equal(headers['x-opencode-project'], ids.project)
   assert.equal(headers['x-kilocode-editorname'], undefined)
+  assert.equal(headers['x-parent-session-id'], undefined, 'no parent headers without a parent session')
+})
+
+test('opencodeUserAgent mirrors the real CLI compound wire format', () => {
+  const agent = opencodeUserAgent()
+  // opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
+  assert.match(agent, /^opencode\/\d+\.\d+\.\d+ ai-sdk\/provider-utils\/[\w.-]+ runtime\/bun\/[\w.-]+$/)
+  assert.ok(!agent.includes('node'), 'never advertise the local Node runtime')
+  assert.ok(!agent.includes('('), 'no parenthesized platform suffix')
+})
+
+test('opencodeHeaders mirrors a parent session in both spellings', () => {
+  const ids = deriveRequestIDs([{ role: 'user', content: 'hello' }], 'opencode2dsh:default-project')
+  ids.parentSession = 'parent-session-seed'
+  const headers = opencodeHeaders(ids)
+  const parent = headers['x-opencode-parent-session-id']
+  assert.match(String(parent), /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+  assert.equal(headers['x-parent-session-id'], parent)
+  assert.notEqual(parent, headers['x-opencode-session'])
 })
 
 test('canonicalZenSessionId is canonical, deterministic, and preserves session affinity', () => {

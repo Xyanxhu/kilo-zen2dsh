@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import { outputCeilingForWindow } from './budget.ts'
+import { opencodeUserAgent } from './opencode-identity.ts'
 
 /**
  * Kilo's public OpenAI-compatible gateway.  The gateway deliberately keeps
@@ -921,8 +922,9 @@ export function normalizeZenGatewayUrl(value: string): string {
 }
 
 function defaultOpenCodeZenUserAgent(): string {
-  const version = process.env.OPENCODE2DSH_VERSION?.trim() || '1.18.21'
-  return `opencode/${version} (${process.platform} ${process.arch}; node${process.versions.node})`
+  // Discovery and inference must present the same client identity; the
+  // shared implementation lives in opencode-identity.ts.
+  return opencodeUserAgent()
 }
 
 async function fetchWithTimeout(
