@@ -60,6 +60,13 @@ export interface Kilo2dshConfig {
   zenApiKeyEnv?: string
   /** Zen's public free-lane placeholder, normally `public`. */
   zenAnonymousKey?: string
+  /**
+   * OpenCode capability catalog filling the limits, modality and capability
+   * metadata Zen's minimal `/v1/models` directory omits (context window,
+   * output ceiling, reasoning, vision). Empty disables the enrichment and
+   * keeps the 256K/32K fallbacks.
+   */
+  zenCapabilitiesUrl?: string
 }
 
 /** @deprecated Use Kilo2dshConfig. */
@@ -84,6 +91,7 @@ export const defaults = {
   zenUserAgent: '',
   zenApiKeyEnv: '',
   zenAnonymousKey: 'public',
+  zenCapabilitiesUrl: 'https://models.opencode.ai/api.json',
   // Kilo's gateway compatibility ceiling; the per-model budget is derived from
   // each model's context window and needs no configuration.
   maxOutputTokens: KILO_GATEWAY_MAX_OUTPUT_TOKENS,
@@ -109,6 +117,7 @@ export type ResolvedConfig = Required<
     | 'zenUserAgent'
     | 'zenApiKeyEnv'
     | 'zenAnonymousKey'
+    | 'zenCapabilitiesUrl'
   >
 > & Kilo2dshConfig
 

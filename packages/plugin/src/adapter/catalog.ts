@@ -2,6 +2,12 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import { outputCeilingForWindow } from './budget.ts'
+import {
+  OPENCODE_CAPABILITIES_URL,
+  enrichZenModels,
+  fetchOpenCodeCapabilities,
+  type OpenCodeModelCapability,
+} from './opencode-capabilities.ts'
 import { opencodeUserAgent } from './opencode-identity.ts'
 
 /**
@@ -562,6 +568,13 @@ export interface CatalogOptions {
   userAgent?: string
   /** Provider-specific model-directory fetcher. */
   fetchCatalog?: CatalogFetcher
+  /**
+   * OpenCode capability catalog used to fill the limits, modality and
+   * capability metadata that Zen's minimal `/v1/models` directory omits.
+   * Defaults to https://models.opencode.ai/api.json; an empty string
+   * disables the enrichment. Only the Zen catalog consults it.
+   */
+  capabilitiesUrl?: string
   /** Human-readable provider label used in diagnostics. */
   catalogLabel?: string
   /** Additional headers sent to the model directory. */
@@ -776,14 +789,51 @@ export class ModelCatalog {
   }
 }
 
+/** Capability metadata is refetched at most this often (the document is static for weeks). */
+const CAPABILITY_TTL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Wrap Zen's models fetcher with capability enrichment. The capability
+ * document (models.opencode.ai/api.json) is memoized for six hours; a
+ * transport or HTTP failure leaves the unenriched records in place —
+ * discovery must never depend on the metadata service.
+ */
+function enrichingZenFetcher(capabilitiesUrl: string): CatalogFetcher {
+  let cached: { capabilities: Map<string, OpenCodeModelCapability>; at: number } | null = null
+  return async (modelsUrl, fetchImpl, options = {}) => {
+    const models = await fetchZenCatalogAtUrl(modelsUrl, fetchImpl, options)
+    try {
+      const now = Date.now()
+      if (cached === null || now - cached.at > CAPABILITY_TTL_MS) {
+        const capabilities = await fetchOpenCodeCapabilities(capabilitiesUrl, fetchImpl, {
+          userAgent: options.userAgent?.trim() || defaultOpenCodeZenUserAgent(),
+          signal: options.signal,
+        })
+        cached = { capabilities, at: now }
+      }
+      return enrichZenModels(models, cached.capabilities)
+    } catch {
+      // Stale-but-valid metadata still beats the hard-coded fallbacks.
+      if (cached !== null) return enrichZenModels(models, cached.capabilities)
+      return models
+    }
+  }
+}
+
 /**
  * OpenCode Zen variant of ModelCatalog. It keeps a separate cache and free
  * classifier because Zen's `/v1/models` response is a minimal OpenAI list,
- * unlike Kilo's richer gateway records.
+ * unlike Kilo's richer gateway records. The default fetcher enriches those
+ * bare records with the limits and capability flags from OpenCode's public
+ * capability catalog, so DSH sees real context windows instead of the
+ * 256K/32K fallbacks.
  */
 export class ZenModelCatalog extends ModelCatalog {
   constructor(options: CatalogOptions = {}) {
     const zenGateway = normalizeZenGatewayUrl(optionalTrim(options.gatewayBaseUrl) ?? optionalTrim(options.zenBaseUrl) ?? OPENCODE_ZEN_BASE_URL)
+    const capabilitiesUrl =
+      options.capabilitiesUrl === undefined ? OPENCODE_CAPABILITIES_URL : options.capabilitiesUrl.trim()
+    const defaultFetcher = capabilitiesUrl === '' ? fetchZenCatalogAtUrl : enrichingZenFetcher(capabilitiesUrl)
     super({
       ...options,
       gatewayBaseUrl: zenGateway,
@@ -794,7 +844,7 @@ export class ZenModelCatalog extends ModelCatalog {
       freePredicate: options.freePredicate ?? isZenFreeModel,
       userAgent: options.userAgent?.trim() || defaultOpenCodeZenUserAgent(),
       extraHeaders: { 'x-opencode-client': 'cli', ...(options.extraHeaders ?? {}) },
-      fetchCatalog: options.fetchCatalog ?? fetchZenCatalogAtUrl,
+      fetchCatalog: options.fetchCatalog ?? defaultFetcher,
       catalogLabel: options.catalogLabel ?? 'OpenCode Zen',
       gatewayMaxOutputTokens: options.gatewayMaxOutputTokens ?? null,
     })

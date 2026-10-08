@@ -35,6 +35,11 @@ Zen 网关决定。两条线路都不绕过认证或计费。
   `kilo-auto/free`、`openrouter/free` 和 `:free`/`-free` 命名。
 - 独立的 OpenCode Zen 目录和 `opencode2dsh` adapter；包含文档列出的免费
   模型，并为 `muse-spark-1.2-contributor-free` 自动使用 Responses API。
+- Zen 模型元数据自动补全：刷新目录时同步拉取 OpenCode 官方能力目录
+  （`models.opencode.ai/api.json`），为 `/v1/models` 不提供的上下文窗口、
+  输出上限、reasoning 与视觉能力填入真实值（如 `step-5-preview-free`
+  的 1M 上下文）；拉取失败时静默回退默认值，不影响模型发现，可用
+  `zenCapabilitiesUrl: ""` 关闭。
 - 默认只显示文本输出且支持 `tools` 的模型，适合 DSH agent 调用。
 - 启动重试、周期刷新、7 天磁盘缓存和健康快照。
 - 可选显式 Kilo/Zen token；默认不会读取环境中的账号密钥。

@@ -321,6 +321,9 @@ test('ZenModelCatalog filters the live OpenCode directory independently of Kilo'
   const catalog = new ZenModelCatalog({
     fetchImpl: fakeFetch({ [`${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`]: body }, capture),
     refreshSeconds: 3600,
+    // This test asserts the models request headers; capability enrichment
+    // issues a second request that would overwrite the capture.
+    capabilitiesUrl: '',
   })
   await catalog.refreshOnce()
   try {

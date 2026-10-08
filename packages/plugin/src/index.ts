@@ -167,6 +167,7 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
         userAgent: cfg.zenUserAgent || undefined,
         apiKey: zenApiKey,
         anonymousKey: cfg.zenAnonymousKey,
+        capabilitiesUrl: cfg.zenCapabilitiesUrl,
         requireTools: cfg.requireTools,
         onRefresh: (status, lastError) => {
           fillDescriptions(zenCatalog)

@@ -38,6 +38,12 @@ account. Neither provider is an authentication or billing bypass.
 - Independent OpenCode Zen catalog and adapter (`opencode2dsh`) with the
   documented free model IDs, a separate cache, and Responses API routing for
   `muse-spark-1.2-contributor-free`.
+- Zen model metadata enrichment from OpenCode's public capability catalog
+  (`models.opencode.ai/api.json`): real context windows, output ceilings,
+  reasoning, and vision for models whose `/v1/models` entries publish none
+  (for example `step-5-preview-free`'s 1M window). A metadata outage silently
+  falls back to the defaults and never blocks discovery; set
+  `zenCapabilitiesUrl: ""` to disable it.
 - Text-output and tool-capable models only, suitable for DSH agent turns.
 - Startup retry, periodic refresh, seven-day disk cache, and a health snapshot.
 - Optional authenticated Kilo or Zen token for compatible deployments; no
