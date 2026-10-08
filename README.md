@@ -62,7 +62,7 @@ tarball instead:
 cd packages/plugin
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./huanx-kilo-zen2dsh-0.4.6.tgz
+dsh plugin --profile web add ./huanx-kilo-zen2dsh-0.4.7.tgz
 ```
 
 Restart `dsh web`, open the model picker, and choose a model in either the
