@@ -36,14 +36,23 @@ test('ZenAdapter does not inherit Kilo gateway output ceiling', () => {
   assert.equal(new KiloAdapter(catalog).resolveModel('kilo2dsh', model).defaultMaxTokens, 524_288)
 })
 
-test('decorateZenPayload fills the five core agent tool shells the free tier requires', () => {
+test('decorateZenPayload fills the five core agent tools with genuine definitions', () => {
   // Plain chat turn: the whole tool set is injected.
   const plain = decorateZenPayload({ model: 'mimo-v2.6-flash-free', stream: true })
+  const injected = plain.tools as Array<{ function: { name: string; description?: string; parameters?: { properties?: Record<string, unknown> } } }>
   assert.deepEqual(
-    (plain.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name),
-    ['bash', 'edit', 'glob', 'grep', 'read'],
+    injected.map((tool) => tool.function.name),
+    ['shell', 'edit', 'glob', 'grep', 'read'],
   )
-  // A caller with its own tools keeps them and only the missing shells are appended.
+  // The 2026-10-14 gate compares recognised tools against the official
+  // definitions; the injected ones must not be synthesised stubs.
+  const shell = injected.find((tool) => tool.function.name === 'shell')
+  assert.ok((shell?.function.description ?? '').length > 20, 'genuine shell description')
+  assert.ok(
+    Object.keys(shell?.function.parameters?.properties ?? {}).length > 0,
+    'genuine shell parameter schema, not an empty stub',
+  )
+  // A caller with its own tools keeps them and only the missing core tools are appended.
   const partial = decorateZenPayload({
     model: 'mimo-v2.6-flash-free',
     stream: true,
@@ -51,14 +60,14 @@ test('decorateZenPayload fills the five core agent tool shells the free tier req
   })
   assert.deepEqual(
     (partial.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name),
-    ['bash', 'edit', 'glob', 'grep', 'read'],
+    ['bash', 'shell', 'edit', 'glob', 'grep', 'read'],
   )
   // Already-complete requests pass through untouched.
   const complete = { model: 'm', stream: true, tools: ZEN_AGENT_CORE_TOOLS_PAYLOAD }
   assert.equal(decorateZenPayload(complete), complete)
 })
 
-const ZEN_AGENT_CORE_TOOLS_PAYLOAD = ['bash', 'edit', 'glob', 'grep', 'read'].map((name) => ({
+const ZEN_AGENT_CORE_TOOLS_PAYLOAD = ['shell', 'edit', 'glob', 'grep', 'read'].map((name) => ({
   type: 'function',
   function: { name, parameters: { type: 'object', properties: {} } },
 }))
@@ -113,14 +122,16 @@ test('ZenAdapter streams through /zen/v1 with public auth and compatibility head
     assert.equal(seenHeaders.authorization, 'Bearer public')
     assert.equal(seenHeaders['x-opencode-client'], 'cli')
     assert.match(String(seenHeaders['user-agent']), /^opencode\//)
-    // The free tier's agent shape: canonical session id and the core tools.
-    assert.match(String(seenHeaders['x-opencode-session']), /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+    // The free tier's agent shape: descending session id and the core tools.
+    assert.match(String(seenHeaders['x-opencode-session']), /^ses_[0-9a-f]{9}f[c-f][0-9a-f][0-9A-Za-z]{14}$/)
     assert.equal(seenHeaders['x-opencode-session-id'], seenHeaders['x-opencode-session'])
-    assert.ok(seenHeaders['x-opencode-request'])
+    assert.match(String(seenHeaders['x-opencode-project']), /^[0-9a-f]{40}$/)
+    assert.equal(seenHeaders['x-opencode-request'], undefined, 'the gate rejects this correlation header')
+    assert.match(String(seenHeaders['user-agent']), /^opencode\/latest\//)
     assert.deepEqual(
       seenBody?.tools?.map((tool) => tool.function.name),
-      ['bash', 'edit', 'glob', 'grep', 'read'],
-      'plain chat turns carry the injected agent tool shells',
+      ['shell', 'edit', 'glob', 'grep', 'read'],
+      'plain chat turns carry the injected core tools with genuine definitions',
     )
     assert.ok(chunks.some((chunk) => chunk.type === 'text-delta'))
   } finally {

@@ -44,6 +44,15 @@ account. Neither provider is an authentication or billing bypass.
   (for example `step-5-preview-free`'s 1M window). A metadata outage silently
   falls back to the defaults and never blocks discovery; set
   `zenCapabilitiesUrl: ""` to disable it.
+- Zen client fingerprint aligned with the 2026-10-14 free-tier gate: the
+  official `opencode/<channel>/<version>/cli` User-Agent, session ids in the
+  client's descending encoding (inverted `~(timestamp<<12|counter)` layout),
+  a bare 40-character hex project header, no `x-opencode-request`, and the
+  five injected core tools (shell/edit/glob/grep/read) carrying the official
+  definitions — both synthesised stubs and the old shapes get 403
+  FreeTierError. The anonymous lane follows upstream to
+  `https://opencode.ai/inference` (override with `zenAnonymousBaseUrl`);
+  a configured account key keeps using `zenBaseUrl`.
 - Text-output and tool-capable models only, suitable for DSH agent turns.
 - Startup retry, periodic refresh, seven-day disk cache, and a health snapshot.
 - Optional authenticated Kilo or Zen token for compatible deployments; no

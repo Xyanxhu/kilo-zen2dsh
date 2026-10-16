@@ -16,6 +16,7 @@ import {
   KILO_GATEWAY_BASE_URL,
   OPENCODE_ZEN_BASE_URL,
   OPENCODE_ZEN_GATEWAY_BASE_URL,
+  OPENCODE_ZEN_ANONYMOUS_GATEWAY_BASE_URL,
   OPENCODE_ZEN_ANONYMOUS_API_KEY,
   ModelCatalog,
   ZenModelCatalog,
@@ -319,7 +320,7 @@ test('ZenModelCatalog filters the live OpenCode directory independently of Kilo'
   }
   const capture: { url?: string; init?: RequestInit } = {}
   const catalog = new ZenModelCatalog({
-    fetchImpl: fakeFetch({ [`${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`]: body }, capture),
+    fetchImpl: fakeFetch({ '*': body }, capture),
     refreshSeconds: 3600,
     // This test asserts the models request headers; capability enrichment
     // issues a second request that would overwrite the capture.
@@ -327,7 +328,9 @@ test('ZenModelCatalog filters the live OpenCode directory independently of Kilo'
   })
   await catalog.refreshOnce()
   try {
-    assert.equal(catalog.modelsUrl, `${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`)
+    // No account key means the anonymous lane, which lives on its own host
+    // since 2026-10-14.
+    assert.equal(catalog.modelsUrl, `${OPENCODE_ZEN_ANONYMOUS_GATEWAY_BASE_URL}/models`)
     assert.deepEqual(catalog.list(), ['big-pickle', 'deepseek-v4-flash-free', 'mimo-v2.5-free'])
     assert.equal(catalog.decision('paid-model').allowed, false)
     assert.equal(catalog.decision('future-free').allowed, false)
@@ -336,6 +339,16 @@ test('ZenModelCatalog filters the live OpenCode directory independently of Kilo'
   } finally {
     catalog.stop()
   }
+})
+
+test('ZenModelCatalog keeps keyed traffic on the Zen host', async () => {
+  const keyed = new ZenModelCatalog({
+    fetchImpl: fakeFetch({}, {}),
+    apiKey: 'sk-test',
+    refreshSeconds: 3600,
+  })
+  assert.equal(keyed.modelsUrl, `${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`)
+  keyed.stop()
 })
 
 test('ZenModelCatalog falls back to its own static free list while offline', async () => {

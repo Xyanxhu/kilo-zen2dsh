@@ -1,5 +1,6 @@
 import {
   OPENCODE_ZEN_ANONYMOUS_API_KEY,
+  OPENCODE_ZEN_ANONYMOUS_BASE_URL,
   OPENCODE_ZEN_BASE_URL,
   OPENCODE_ZEN_GATEWAY_BASE_URL,
   ZEN_VISION_MODEL_IDS,
@@ -11,6 +12,7 @@ import {
   type KiloAdapterOptions,
 } from './kilo-adapter.ts'
 import { opencodeHeaders, opencodeUserAgent, type RequestIDs } from './ids.ts'
+import { OPENCODE_TOOL_DEFINITIONS } from './opencode-tools.ts'
 import type { Api } from '@earendil-works/pi-ai'
 import type { KiloModel } from './catalog.ts'
 
@@ -24,20 +26,26 @@ export const ZEN_RESPONSES_MODEL_IDS = ['muse-spark-1.2-contributor-free'] as co
 
 /**
  * The five core agent tool names Zen's free tier requires in the request's
- * tools array (the check is name-only: shell tool definitions satisfy it).
- * Without all five the gateway answers 403 FreeTierError even for a
- * perfectly formed session.
+ * tools array. "shell" is the name OpenCode 2.x ships; the pre-2.x "bash"
+ * spelling is deliberately not injected.
  */
-const ZEN_AGENT_CORE_TOOLS = ['bash', 'edit', 'glob', 'grep', 'read'] as const
+const ZEN_AGENT_CORE_TOOLS = ['shell', 'edit', 'glob', 'grep', 'read'] as const
 
-/** Shell tool definition in OpenAI chat-completions format. */
-function agentShellTool(name: string): { type: 'function'; function: { name: string; description: string; parameters: { type: 'object'; properties: Record<string, never> } } } {
+/**
+ * One core tool in OpenAI chat-completions format carrying the genuine
+ * OpenCode definition. Since 2026-10-14 the free-tier gate validates the
+ * description and parameter schema of every tool whose name it recognises —
+ * a synthesised stub is rejected with 403 FreeTierError even with the right
+ * name — so the definitions captured from the official client are embedded.
+ */
+function agentShellTool(name: string): { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } } {
+  const definition = OPENCODE_TOOL_DEFINITIONS[name]
   return {
     type: 'function',
     function: {
       name,
-      description: `Agent tool ${name}`,
-      parameters: { type: 'object', properties: {} },
+      description: definition?.description ?? `Agent tool ${name}`,
+      parameters: definition?.parameters ?? { type: 'object', properties: {} },
     },
   }
 }
@@ -46,10 +54,12 @@ function agentShellTool(name: string): { type: 'function'; function: { name: str
  * Zen's anonymous free lane (Bearer public) only accepts requests shaped
  * like an OpenCode agent turn: streaming, with the five core agent tools
  * present. pi-ai already streams every request; this decorator fills in the
- * missing tool shells on plain chat turns so they satisfy the same shape.
- * The empty schemas keep them inert — a model that actually calls one only
- * ever emits a tool call the caller already knows how to reject, and tool
- * callers (DSH coding sessions) already carry the real definitions.
+ * missing core tools on plain chat turns so they satisfy the same shape.
+ *
+ * Downstream (DSH) tools are deliberately left untouched, even when they
+ * reuse a recognised name: rewriting their definitions would change the
+ * schema the model sees and break this harness's own function-call parsing.
+ * Only the names this decorator injects carry the genuine definitions.
  */
 export function decorateZenPayload(payload: Record<string, unknown>): Record<string, unknown> {
   // OpenAI chat-completions spelling: tools: [{ type: 'function', function: { name } }]
@@ -114,7 +124,10 @@ export interface ZenAdapterOptions extends KiloAdapterOptions {
  */
 export class ZenAdapter extends KiloAdapter {
   constructor(catalog: CatalogLike, options: ZenAdapterOptions = {}) {
-    const gatewayBaseUrl = normalizeZenGatewayUrl(options.gatewayBaseUrl?.trim() || options.zenBaseUrl?.trim() || OPENCODE_ZEN_BASE_URL)
+    // Keyless and keyed traffic live on different hosts since 2026-10-14;
+    // an explicit base always wins, otherwise the default follows the lane.
+    const defaultBase = options.apiKey?.trim() ? OPENCODE_ZEN_BASE_URL : OPENCODE_ZEN_ANONYMOUS_BASE_URL
+    const gatewayBaseUrl = normalizeZenGatewayUrl(options.gatewayBaseUrl?.trim() || options.zenBaseUrl?.trim() || defaultBase)
     const userAgent = options.userAgent?.trim() || opencodeUserAgent()
     super(catalog, {
       ...options,

@@ -40,6 +40,13 @@ Zen 网关决定。两条线路都不绕过认证或计费。
   输出上限、reasoning 与视觉能力填入真实值（如 `step-5-preview-free`
   的 1M 上下文）；拉取失败时静默回退默认值，不影响模型发现，可用
   `zenCapabilitiesUrl: ""` 关闭。
+- Zen 客户端指纹对齐 2026-10-14 的免费层校验：官方
+  `opencode/<channel>/<version>/cli` UA 形状、descending 编码的会话 ID
+  （`~(时间戳<<12|counter)` 取反布局）、40 位裸 hex 项目头、不发送
+  `x-opencode-request`，并且注入的五个核心工具（shell/edit/glob/grep/read）
+  携带官方真实定义——合成 stub 与旧形状都会被 403 FreeTierError 拒绝。
+  匿名通道随上游迁移到 `https://opencode.ai/inference`（可用
+  `zenAnonymousBaseUrl` 覆盖），有账号 Key 时仍走 `zenBaseUrl`。
 - 默认只显示文本输出且支持 `tools` 的模型，适合 DSH agent 调用。
 - 启动重试、周期刷新、7 天磁盘缓存和健康快照。
 - 可选显式 Kilo/Zen token；默认不会读取环境中的账号密钥。

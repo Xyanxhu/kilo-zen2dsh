@@ -23,6 +23,13 @@ export const OPENCODE_ZEN_BASE_URL = 'https://opencode.ai/zen'
 export const OPENCODE_ZEN_GATEWAY_BASE_URL = `${OPENCODE_ZEN_BASE_URL}/v1`
 export const OPENCODE_ZEN_MODELS_URL = `${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`
 /**
+ * Base URL of the keyless free-tier lane. Since 2026-10-14 the anonymous lane
+ * moved off `/zen` onto its own host; keyed traffic keeps using
+ * `OPENCODE_ZEN_BASE_URL`. Both serve `/v1/models` and the inference paths.
+ */
+export const OPENCODE_ZEN_ANONYMOUS_BASE_URL = 'https://opencode.ai/inference'
+export const OPENCODE_ZEN_ANONYMOUS_GATEWAY_BASE_URL = `${OPENCODE_ZEN_ANONYMOUS_BASE_URL}/v1`
+/**
  * Public placeholder used by OpenCode itself when no Zen account key exists.
  * Source: https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/provider/provider.ts
  */
@@ -830,7 +837,13 @@ function enrichingZenFetcher(capabilitiesUrl: string): CatalogFetcher {
  */
 export class ZenModelCatalog extends ModelCatalog {
   constructor(options: CatalogOptions = {}) {
-    const zenGateway = normalizeZenGatewayUrl(optionalTrim(options.gatewayBaseUrl) ?? optionalTrim(options.zenBaseUrl) ?? OPENCODE_ZEN_BASE_URL)
+    // The keyless lane and the keyed lane live on different hosts since
+    // 2026-10-14. An explicit base always wins, but the default follows the
+    // lane: no account key means anonymous traffic on /inference.
+    const defaultBase = options.apiKey?.trim() ? OPENCODE_ZEN_BASE_URL : OPENCODE_ZEN_ANONYMOUS_BASE_URL
+    const zenGateway = normalizeZenGatewayUrl(
+      optionalTrim(options.gatewayBaseUrl) ?? optionalTrim(options.zenBaseUrl) ?? defaultBase,
+    )
     const capabilitiesUrl =
       options.capabilitiesUrl === undefined ? OPENCODE_CAPABILITIES_URL : options.capabilitiesUrl.trim()
     const defaultFetcher = capabilitiesUrl === '' ? fetchZenCatalogAtUrl : enrichingZenFetcher(capabilitiesUrl)

@@ -7,7 +7,7 @@ import {
   parseOpenCodeCapabilities,
   type CapabilityTargetModel,
 } from '../src/adapter/opencode-capabilities.ts'
-import { modelInfo, OPENCODE_ZEN_GATEWAY_BASE_URL, ZenModelCatalog } from '../src/adapter/catalog.ts'
+import { modelInfo, OPENCODE_ZEN_ANONYMOUS_GATEWAY_BASE_URL, ZenModelCatalog } from '../src/adapter/catalog.ts'
 
 const capabilityBody = {
   'some-vendor': {
@@ -206,7 +206,7 @@ test('ZenModelCatalog survives a capability catalog outage', async () => {
   try {
     assert.ok(catalog.get('step-5-preview-free'))
     assert.equal(modelInfo(catalog.get('step-5-preview-free')!).contextWindow, 262_144)
-    assert.deepEqual(calls, [`${OPENCODE_ZEN_GATEWAY_BASE_URL}/models`, OPENCODE_CAPABILITIES_URL])
+    assert.deepEqual(calls, [`${OPENCODE_ZEN_ANONYMOUS_GATEWAY_BASE_URL}/models`, OPENCODE_CAPABILITIES_URL])
   } finally {
     catalog.stop()
   }

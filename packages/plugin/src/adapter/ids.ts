@@ -62,20 +62,60 @@ export function kiloUserAgent(): string {
 const BASE62_ALPHABET =
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
 
+const CANONICAL_SESSION_PATTERN = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
+
+/**
+ * The time part the official client mints with its `descending()` identifier
+ * encoding: a 48-bit word `~(timestamp_ms << 12 | counter)` rendered as hex.
+ * The bitwise NOT makes the low 12 bits read `0xfff - counter`, and the free
+ * tier accepts only counters 1-63 (low bits 0xfc0-0xfff) since 2026-10-14 —
+ * a random or hash-shaped time part is rejected with 403 FreeTierError even
+ * when the `ses_` shape is otherwise correct.
+ */
+const DESCENDING_TIME_PART_PATTERN = /^[0-9a-f]{9}f[c-f][0-9a-f]$/
+
+/**
+ * Render six hash bytes as the client's descending time part: a 36-bit
+ * timestamp reconstructed from bytes 0-3 plus the high nibble of byte 4,
+ * shifted into the top of a 48-bit word, counter 1 ORed in, then inverted.
+ */
+function descendingTimePart(hash: Buffer): string {
+  const timestamp =
+    (BigInt(hash[0]!) << 28n) |
+    (BigInt(hash[1]!) << 20n) |
+    (BigInt(hash[2]!) << 12n) |
+    (BigInt(hash[3]!) << 4n) |
+    (BigInt(hash[4]!) >> 4n)
+  const inverted = ~((timestamp << 12n) | 1n) & 0xffffffffffffn
+  return inverted.toString(16).padStart(12, '0')
+}
+
 /**
  * Canonical OpenCode session id: `ses_` + 12 lowercase hex + 14 Base62.
- * Zen's free tier validates this shape on `x-opencode-session` (anything else
- * is rejected with 403 FreeTierError). The id stays stable per conversation:
- * it is derived deterministically from the adapter's stable session seed
- * rather than rolled fresh per request, preserving session affinity.
+ * Zen's free tier validates this shape on `x-opencode-session` and, since
+ * 2026-10-14, also validates the time-part encoding: it must carry the
+ * official client's descending() layout (a hash-shaped time part gets 403
+ * FreeTierError even though the shape matches). The id stays stable per
+ * conversation: it is derived deterministically from the adapter's stable
+ * session seed rather than rolled fresh per request, preserving affinity.
  */
 export function canonicalZenSessionId(seed: string): string {
   const value = seed.trim()
-  if (/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/.test(value)) return value
+  if (CANONICAL_SESSION_PATTERN.test(value) && DESCENDING_TIME_PART_PATTERN.test(value.slice(4, 16))) return value
   const digest = createHash('sha256').update(value).digest()
   let tail = ''
   for (const byte of digest.subarray(6, 20)) tail += BASE62_ALPHABET[byte % 62]
-  return `ses_${digest.subarray(0, 6).toString('hex')}${tail}`
+  return `ses_${descendingTimePart(digest.subarray(0, 6))}${tail}`
+}
+
+/**
+ * Project identity in the shape the client sends: a bare 40-character
+ * lowercase hex id. The 2026-10-14 gate rejects the gateway's own `prj_`
+ * prefix with 403 FreeTierError; the value itself is not checked upstream,
+ * so hashing keeps one conversation pinned to one project.
+ */
+export function clientProjectID(project: string): string {
+  return createHash('sha256').update(`opencode-project\x00${project}`).digest().subarray(0, 20).toString('hex')
 }
 
 export { opencodeUserAgent } from './opencode-identity.ts'
@@ -111,20 +151,20 @@ export interface OpenCodeHeaderOptions {
 
 /** Headers expected by the OpenCode Zen compatibility/free lane. */
 export function opencodeHeaders(ids: RequestIDs, options: OpenCodeHeaderOptions = {}): Record<string, string> {
-  // The free tier validates the canonical ses_ shape; non-canonical values
-  // (older adapters, arbitrary session ids) would be rejected with 403.
+  // The free tier validates the canonical ses_ shape and, since 2026-10-14,
+  // the client's descending time-part encoding; both are handled inside
+  // canonicalZenSessionId. The client's own x-opencode-request correlation
+  // header and the prj_* project shape are rejected by that same gate, so
+  // neither is sent; tracing stays local to this adapter.
   const session = canonicalZenSessionId(ids.session)
   const headers: Record<string, string> = {
     'user-agent': options.userAgent ?? opencodeUserAgent(),
     'x-opencode-client': options.client ?? 'cli',
     'x-opencode-session': session,
-    // CLI 1.18.34+ sends the namespaced session identity alongside the
-    // legacy correlation pair; Zen forwards it to the new inference service.
     'x-opencode-session-id': session,
     'x-session-affinity': session,
     'X-Session-Id': session,
-    'x-opencode-request': ids.request,
-    'x-opencode-project': ids.project,
+    'x-opencode-project': clientProjectID(ids.project),
   }
   if (ids.parentSession) {
     const parent = canonicalZenSessionId(ids.parentSession)

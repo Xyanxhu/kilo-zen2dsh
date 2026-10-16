@@ -54,6 +54,12 @@ export interface Kilo2dshConfig {
   zenProviderId?: string
   /** OpenCode Zen root URL, normally `https://opencode.ai/zen`. */
   zenBaseUrl?: string
+  /**
+   * Base URL of the keyless free-tier lane. Since 2026-10-14 anonymous
+   * traffic lives on its own host (`https://opencode.ai/inference`) while
+   * keyed traffic stays on `zenBaseUrl`.
+   */
+  zenAnonymousBaseUrl?: string
   /** Optional Zen compatibility User-Agent; empty derives the current OpenCode format. */
   zenUserAgent?: string
   /** Explicit Zen account-token environment variable; empty keeps public lane. */
@@ -88,6 +94,7 @@ export const defaults = {
   zenEnabled: true,
   zenProviderId: 'opencode2dsh',
   zenBaseUrl: 'https://opencode.ai/zen',
+  zenAnonymousBaseUrl: 'https://opencode.ai/inference',
   zenUserAgent: '',
   zenApiKeyEnv: '',
   zenAnonymousKey: 'public',
@@ -114,6 +121,7 @@ export type ResolvedConfig = Required<
     | 'zenEnabled'
     | 'zenProviderId'
     | 'zenBaseUrl'
+    | 'zenAnonymousBaseUrl'
     | 'zenUserAgent'
     | 'zenApiKeyEnv'
     | 'zenAnonymousKey'

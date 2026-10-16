@@ -83,25 +83,27 @@ test('opencodeHeaders carries Zen compatibility identifiers independently', () =
   const headers = opencodeHeaders(ids)
   assert.equal(headers['user-agent'], opencodeUserAgent())
   assert.equal(headers['x-opencode-client'], 'cli')
-  // The free tier validates the canonical ses_ shape (12 hex + 14 Base62),
-  // so the header never carries the raw stableID spelling.
-  assert.match(String(headers['x-opencode-session']), /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
-  // CLI 1.18.34+ sends the namespaced identity alongside the legacy pair.
+  // The free tier validates the canonical ses_ shape and the client's
+  // descending time-part encoding (12 hex + 14 Base62, low word ~0xfff).
+  assert.match(String(headers['x-opencode-session']), /^ses_[0-9a-f]{9}f[c-f][0-9a-f][0-9A-Za-z]{14}$/)
   assert.equal(headers['x-opencode-session-id'], headers['x-opencode-session'])
   assert.equal(headers['x-session-affinity'], headers['x-opencode-session'])
   assert.equal(headers['X-Session-Id'], headers['x-opencode-session'])
-  assert.equal(headers['x-opencode-request'], ids.request)
-  assert.equal(headers['x-opencode-project'], ids.project)
+  // The 2026-10-14 gate rejects the gateway's x-opencode-request header and
+  // the prj_* project shape; the project goes out as a bare 40-char hex id.
+  assert.equal(headers['x-opencode-request'], undefined)
+  assert.match(String(headers['x-opencode-project']), /^[0-9a-f]{40}$/)
+  assert.notEqual(headers['x-opencode-project'], ids.project)
   assert.equal(headers['x-kilocode-editorname'], undefined)
   assert.equal(headers['x-parent-session-id'], undefined, 'no parent headers without a parent session')
 })
 
-test('opencodeUserAgent mirrors the real CLI compound wire format', () => {
+test('opencodeUserAgent mirrors the official client channel wire format', () => {
   const agent = opencodeUserAgent()
-  // opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
-  assert.match(agent, /^opencode\/\d+\.\d+\.\d+ ai-sdk\/provider-utils\/[\w.-]+ runtime\/bun\/[\w.-]+$/)
+  // opencode/latest/2.0.30/cli
+  assert.match(agent, /^opencode\/[a-z]+\/\d+\.\d+\.\d+\/cli$/)
+  assert.ok(!agent.includes('ai-sdk'), 'the 1.x compound ai-sdk suffix is rejected by the Oct 14 gate')
   assert.ok(!agent.includes('node'), 'never advertise the local Node runtime')
-  assert.ok(!agent.includes('('), 'no parenthesized platform suffix')
 })
 
 test('opencodeHeaders mirrors a parent session in both spellings', () => {
@@ -116,10 +118,19 @@ test('opencodeHeaders mirrors a parent session in both spellings', () => {
 
 test('canonicalZenSessionId is canonical, deterministic, and preserves session affinity', () => {
   const fromSeed = canonicalZenSessionId('some-stable-session-seed')
-  assert.match(fromSeed, /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/)
+  // The free tier requires the client's descending time-part encoding since
+  // 2026-10-14: a hash-shaped (legacy) time part is rejected with 403.
+  assert.match(fromSeed, /^ses_[0-9a-f]{9}f[c-f][0-9a-f][0-9A-Za-z]{14}$/)
   assert.equal(canonicalZenSessionId('some-stable-session-seed'), fromSeed, 'same seed maps to one session')
   assert.notEqual(canonicalZenSessionId('another-seed'), fromSeed)
-  // An already-canonical value passes through untouched (custom upstreams).
+  // An already-canonical client session passes through untouched.
   const canonical = canonicalZenSessionId(fromSeed)
   assert.equal(canonical, fromSeed)
+  // A canonical-looking but foreign-encoded session (legacy hash time part)
+  // is re-encoded deterministically into the descending layout.
+  const foreign = 'ses_0123456789abABCDEFGHIJKLMNOP'
+  const reencoded = canonicalZenSessionId(foreign)
+  assert.notEqual(reencoded, foreign)
+  assert.match(reencoded, /^ses_[0-9a-f]{9}f[c-f][0-9a-f][0-9A-Za-z]{14}$/)
+  assert.equal(canonicalZenSessionId(foreign), reencoded)
 })

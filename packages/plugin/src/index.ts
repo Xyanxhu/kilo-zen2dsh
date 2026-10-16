@@ -160,10 +160,12 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
       logger.warn(`kilo2dsh: Zen provider id "${cfg.zenProviderId}" matches Kilo provider; Zen registration skipped`)
     } else {
       const zenApiKey = cfg.zenApiKeyEnv ? process.env[cfg.zenApiKeyEnv]?.trim() || undefined : undefined
+      // Keyless and keyed traffic live on different hosts since 2026-10-14.
+      const zenLaneBaseUrl = zenApiKey ? cfg.zenBaseUrl : cfg.zenAnonymousBaseUrl
       const zenCatalog = new ZenModelCatalog({
         refreshSeconds: cfg.refreshSeconds,
         cachePath: defaultZenCachePath(dataDir),
-        zenBaseUrl: cfg.zenBaseUrl,
+        zenBaseUrl: zenLaneBaseUrl,
         userAgent: cfg.zenUserAgent || undefined,
         apiKey: zenApiKey,
         anonymousKey: cfg.zenAnonymousKey,
@@ -177,7 +179,7 @@ function applyAdapter(ctx: PluginContext, config: Kilo2dshConfig): { ready: Prom
       })
       const zenAdapter = new ZenAdapter(zenCatalog, {
         providerId: cfg.zenProviderId,
-        zenBaseUrl: cfg.zenBaseUrl,
+        zenBaseUrl: zenLaneBaseUrl,
         userAgent: cfg.zenUserAgent || undefined,
         apiKey: zenApiKey,
         anonymousKey: cfg.zenAnonymousKey,
