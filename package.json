@@ -8,6 +8,6 @@
     }
   },
   "dependencies": {
-    "@huanx/kilo-zen2dsh": "^0.4.7"
+    "@huanx/kilo-zen2dsh": "^0.4.8"
   }
 }
